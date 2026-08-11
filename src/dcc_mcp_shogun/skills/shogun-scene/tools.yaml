@@ -1,0 +1,97 @@
+tools:
+  - name: inspect_scene
+    description: Return a bounded, path-redacted snapshot of the active Shogun Post scene.
+    source_file: scripts/inspect_scene.py
+    input_schema:
+      type: object
+      properties:
+        max_subjects: {type: integer, minimum: 1, maximum: 1000, default: 100}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 10
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-success: [shogun_scene__list_markers, shogun_scene__list_bones]
+
+  - name: list_markers
+    description: List a bounded set of marker names for one explicit subject.
+    source_file: scripts/list_markers.py
+    input_schema:
+      type: object
+      required: [subject]
+      properties:
+        subject: {type: string, minLength: 1, maxLength: 512}
+        max_markers: {type: integer, minimum: 1, maximum: 10000, default: 1000}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 10
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-success: [shogun_scene__get_trajectory_at_frame]
+      on-failure: [shogun_scene__inspect_scene]
+
+  - name: list_bones
+    description: List a bounded labeling or solving skeleton for one explicit subject.
+    source_file: scripts/list_bones.py
+    input_schema:
+      type: object
+      required: [subject, skeleton]
+      properties:
+        subject: {type: string, minLength: 1, maxLength: 512}
+        skeleton: {type: string, enum: [Labeling, Solving]}
+        max_bones: {type: integer, minimum: 1, maximum: 10000, default: 1000}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 10
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-failure: [shogun_scene__inspect_scene]
+
+  - name: get_trajectory_at_frame
+    description: Read one marker position at one explicit Shogun trial frame.
+    source_file: scripts/get_trajectory_at_frame.py
+    input_schema:
+      type: object
+      required: [subject, marker, frame]
+      properties:
+        subject: {type: string, minLength: 1, maxLength: 512}
+        marker: {type: string, minLength: 1, maxLength: 512}
+        frame: {type: integer, minimum: 0}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 10
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-failure: [shogun_scene__list_markers, shogun_scene__inspect_scene]
