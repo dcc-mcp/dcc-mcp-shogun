@@ -1,5 +1,7 @@
 # dcc-mcp-shogun
 
+![dcc-mcp-shogun brand lockup](docs/assets/dcc-mcp-shogun.svg)
+
 [![CI](https://github.com/dcc-mcp/dcc-mcp-shogun/actions/workflows/ci.yml/badge.svg)](https://github.com/dcc-mcp/dcc-mcp-shogun/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/dcc-mcp-shogun.svg)](https://pypi.org/project/dcc-mcp-shogun/)
 [![Python](https://img.shields.io/pypi/pyversions/dcc-mcp-shogun.svg)](https://pypi.org/project/dcc-mcp-shogun/)
