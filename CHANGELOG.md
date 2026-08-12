@@ -11,6 +11,13 @@
 - Add ROM labeling, subject calibration, QuickPost, and expanded processing
   settings from the official `Offline` interface.
 
+## [0.3.0](https://github.com/dcc-mcp/dcc-mcp-shogun/compare/v0.2.0...v0.3.0) (2026-08-12)
+
+
+### Features
+
+* expand official Shogun SDK workflows ([#4](https://github.com/dcc-mcp/dcc-mcp-shogun/issues/4)) ([92e49de](https://github.com/dcc-mcp/dcc-mcp-shogun/commit/92e49de5208e5542d2489259509792dfd857a71b))
+
 ## [0.2.0](https://github.com/dcc-mcp/dcc-mcp-shogun/compare/v0.1.0...v0.2.0) (2026-08-12)
 
 
