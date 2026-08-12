@@ -17,5 +17,8 @@ def safe_result(message: str, operation: Callable[[], Dict[str, Any]]):
             "Shogun operation failed.",
             type(error).__name__,
             error_type=type(error).__name__,
-            prompt="Inspect the active scene and verify the requested subject, marker, or file.",
+            prompt=(
+                "Inspect the active scene and verify the requested capability, frame scope, "
+                "subject, marker, or file."
+            ),
         )

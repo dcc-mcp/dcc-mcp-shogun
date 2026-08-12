@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import importlib
 import os
 import socket
 import sys
@@ -15,6 +16,8 @@ CONTROL_PORT_ENV = "DCC_MCP_SHOGUN_CONTROL_PORT"
 DEFAULT_CONTROL_PORT = 803
 CONTROL_PORT_MAX = 899
 _configured_control_port: Optional[int] = None
+_interface_connection: Any = None
+_INTERFACE_CLASSES = {"Offline", "Timeline"}
 
 
 class _TcpRowOwnerPid(ctypes.Structure):
@@ -243,3 +246,17 @@ def connect_client() -> Any:
         raise ShogunSdkError(
             f"Unable to connect to the local Shogun Post control stream ({type(error).__name__})"
         ) from error
+
+
+def official_interface(name: str) -> Any:
+    """Create one allowlisted interface from Vicon's official SDK package."""
+    global _interface_connection
+    if name not in _INTERFACE_CLASSES:
+        raise ShogunSdkError(f"{name} is not an enabled SDK interface")
+    _interface_connection = connect_client()
+    try:
+        module = importlib.import_module(f"ViconShogunPostSDK.{name}")
+        interface_class = getattr(module, name)
+        return interface_class()
+    except (ImportError, AttributeError) as error:
+        raise ShogunSdkError(f"The official {name} SDK interface is unavailable") from error

@@ -12,7 +12,9 @@ studio capture data, installation paths, machine names, or credentials.
 5. Inspect the active scene through Vicon's official external Python SDK.
 6. Probe the host's file-operation capability with the anonymous BVH through
    the typed `shogun-files` Skill.
-7. Continue to save/export only when the selected host build accepts the import;
+7. Probe the official `Timeline` and `Offline` interfaces through their typed
+   Skills without running UI fallback.
+8. Continue to save/export only when the selected host build accepts the import;
    otherwise retain the fail-closed result as compatibility evidence.
 
 ## Reproduce
@@ -23,6 +25,10 @@ dcc-mcp-shogun --host-pid <SHOGUN_POST_PID>
 dcc-mcp-cli list
 dcc-mcp-cli search scene --dcc-type shogun
 dcc-mcp-cli call <instance>.shogun_scene__inspect_scene --json '{}' --wait
+dcc-mcp-cli load-skill shogun-timeline --dcc-type shogun --instance-id <instance>
+dcc-mcp-cli call <instance>.shogun_timeline__inspect_timeline --json '{}' --wait
+dcc-mcp-cli load-skill shogun-processing --dcc-type shogun --instance-id <instance>
+dcc-mcp-cli call <instance>.shogun_processing__inspect_processing_settings --json '{"section":"reconstruct"}' --wait
 dcc-mcp-cli load-skill shogun-files --dcc-type shogun --instance-id <instance>
 dcc-mcp-cli call <instance>.shogun_files__import_motion --json-file import.json --wait
 ```
@@ -42,6 +48,9 @@ not included.
 - import, save, and export implementations use only the official SDK and return
   path-redacted result metadata, but are not presented as live-supported on
   that host build;
+- Shogun Post 1.19 rejects the official `Timeline` and `Offline` interface
+  commands as invalid for that host application; typed calls return bounded
+  errors, so support is not overclaimed and no processing mutation is attempted;
 - returned scene paths are reduced to file names;
 - vendor exceptions are reduced to exception class names without tracebacks;
 - unit tests, skill validation, package build, metadata check, and CI all pass.

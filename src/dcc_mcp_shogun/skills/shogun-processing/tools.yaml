@@ -1,0 +1,143 @@
+tools:
+  - name: inspect_processing_settings
+    description: Read a stable allowlist of reconstruct, solving, or occlusion settings.
+    source_file: scripts/inspect_processing_settings.py
+    input_schema:
+      type: object
+      required: [section]
+      properties:
+        section: {type: string, enum: [reconstruct, solving, occlusion]}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 10
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+
+  - name: reconstruct
+    description: Reconstruct 2D camera data for only the current frame or selected time ranges.
+    source_file: scripts/reconstruct.py
+    input_schema:
+      type: object
+      required: [range_mode]
+      properties:
+        range_mode: {type: string, enum: [current_frame, selected_ranges]}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 300
+    annotations:
+      read_only_hint: false
+      destructive_hint: true
+      idempotent_hint: false
+      open_world_hint: false
+      deferred_hint: true
+    next-tools:
+      on-success: [shogun_scene__inspect_scene]
+
+  - name: auto_label
+    description: Auto-label active or selected subjects for an explicit bounded time scope.
+    source_file: scripts/auto_label.py
+    input_schema:
+      type: object
+      required: [range_mode, subjects]
+      properties:
+        range_mode: {type: string, enum: [current_frame, selected_ranges]}
+        subjects: {type: string, enum: [active, selected]}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 300
+    annotations:
+      read_only_hint: false
+      destructive_hint: true
+      idempotent_hint: false
+      open_world_hint: false
+      deferred_hint: true
+    next-tools:
+      on-success: [shogun_scene__inspect_scene]
+
+  - name: fix_occlusion
+    description: Fix occlusion for active or selected subjects over an explicit bounded time scope.
+    source_file: scripts/fix_occlusion.py
+    input_schema:
+      type: object
+      required: [range_mode, subjects]
+      properties:
+        range_mode: {type: string, enum: [current_frame, selected_ranges]}
+        subjects: {type: string, enum: [active, selected]}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 300
+    annotations:
+      read_only_hint: false
+      destructive_hint: true
+      idempotent_hint: false
+      open_world_hint: false
+      deferred_hint: true
+    next-tools:
+      on-success: [shogun_scene__inspect_scene]
+
+  - name: solve
+    description: Apply active solvers for only the current frame or selected time ranges.
+    source_file: scripts/solve.py
+    input_schema:
+      type: object
+      required: [range_mode]
+      properties:
+        range_mode: {type: string, enum: [current_frame, selected_ranges]}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 300
+    annotations:
+      read_only_hint: false
+      destructive_hint: true
+      idempotent_hint: false
+      open_world_hint: false
+      deferred_hint: true
+    next-tools:
+      on-success: [shogun_scene__inspect_scene]
+
+  - name: retarget
+    description: Retarget only the current frame or selected time ranges using the active setup.
+    source_file: scripts/retarget.py
+    input_schema:
+      type: object
+      required: [range_mode]
+      properties:
+        range_mode: {type: string, enum: [current_frame, selected_ranges]}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 300
+    annotations:
+      read_only_hint: false
+      destructive_hint: true
+      idempotent_hint: false
+      open_world_hint: false
+      deferred_hint: true
+    next-tools:
+      on-success: [shogun_scene__inspect_scene]
