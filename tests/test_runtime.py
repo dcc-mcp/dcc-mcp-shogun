@@ -108,6 +108,18 @@ class FakeTimeline:
     def SetPlayEnd(self, frame):
         self.calls.append(("SetPlayEnd", frame))
 
+    def SetAnimationStart(self, frame):
+        self.calls.append(("SetAnimationStart", frame))
+
+    def SetAnimationEnd(self, frame):
+        self.calls.append(("SetAnimationEnd", frame))
+
+    def Play(self):
+        self.calls.append(("Play",))
+
+    def Stop(self):
+        self.calls.append(("Stop",))
+
 
 class FakeOffline:
     def __init__(self):
@@ -150,6 +162,40 @@ class FakeOffline:
             },
         )()
 
+    def GetLabelROMSettings(self):
+        return type(
+            "Settings",
+            (),
+            {"StandardDeviation": 2.5, "SeparationDistance": 50.0},
+        )()
+
+    def GetLabelingSubjectCalibrationSettings(self):
+        return type(
+            "Settings",
+            (),
+            {
+                "JointImportance": 1.0,
+                "MarkerImportance": 2.0,
+                "SegmentImportance": 3.0,
+                "Quality": "Normal",
+                "StatsMode": "CopyTemplate",
+                "CalibrationMode": "Full",
+                "ActiveFrames": 120,
+            },
+        )()
+
+    def GetCircleFitSettings(self):
+        return type(
+            "Settings",
+            (),
+            {
+                "Enabled": True,
+                "StoreCentroids": False,
+                "EnableVideoCentroids": True,
+                "NumThreads": 4,
+            },
+        )()
+
     def Reconstruct(self, range_mode):
         self.calls.append(("Reconstruct", range_mode))
 
@@ -164,6 +210,86 @@ class FakeOffline:
 
     def Retarget(self, range_mode):
         self.calls.append(("Retarget", range_mode))
+
+    def LabelROM(self, subjects, range_mode):
+        self.calls.append(("LabelROM", subjects, range_mode))
+
+    def CalibrateLabelingSubjects(self, subjects, range_mode):
+        self.calls.append(("CalibrateLabelingSubjects", subjects, range_mode))
+
+    def CalibrateSolvingSubjects(self, subjects, range_mode):
+        self.calls.append(("CalibrateSolvingSubjects", subjects, range_mode))
+
+    def QuickPost(self, process_level, range_mode):
+        self.calls.append(("QuickPost", process_level, range_mode))
+
+
+class FakeVectorChannel:
+    def __init__(self, value):
+        self.value = value
+
+    def __getitem__(self, frame):
+        assert frame == 42
+        return self.value
+
+
+class FakeSceneObject:
+    def __init__(self, name, path, object_type, parent=None):
+        self.Name = name
+        self.Path = path
+        self.Type = object_type
+        self.Showing = True
+        self.Selectable = True
+        self.Opacity = 1.0
+        self.Translation = FakeVectorChannel([1.0, 2.0, 3.0])
+        self.Rotation = FakeVectorChannel([10.0, 20.0, 30.0])
+        self.Scale = FakeVectorChannel([1.0, 1.0, 1.0])
+        self._parent = parent
+        self._children = []
+
+    def GetParent(self):
+        return self._parent
+
+    def GetChildren(self):
+        return self._children
+
+
+class FakeObjectList:
+    def __init__(self, objects):
+        self._objects = objects
+
+    def __getitem__(self, path):
+        return next((value for value in self._objects if value.Path == path), None)
+
+    def ToList(self):
+        return list(self._objects)
+
+    def FilterByType(self, object_type):
+        return [value for value in self._objects if value.Type == object_type]
+
+
+class FakeScene:
+    def __init__(self):
+        self.root = FakeSceneObject("Actor", "/Actor", "Character")
+        self.marker = FakeSceneObject("LFHD", "/Actor/LFHD", "Marker", self.root)
+        self.root._children = [self.marker]
+        self.Objects = FakeObjectList([self.root, self.marker])
+        self.selected = [self.root]
+        self.calls = []
+
+    def GetSelectedObjects(self):
+        return list(self.selected)
+
+    def GetPrimarySelectedObject(self):
+        return self.selected[-1] if self.selected else None
+
+    def DeselectAllObjects(self):
+        self.calls.append(("DeselectAllObjects",))
+        self.selected = []
+
+    def SelectObject(self, value):
+        self.calls.append(("SelectObject", value.Path))
+        self.selected.append(value)
 
 
 @pytest.fixture
@@ -242,6 +368,103 @@ def test_trajectory_window_is_inclusive_and_bounded(client):
     }
     with pytest.raises(ValueError, match="at most 2000"):
         runtime.trajectory_window("PerformerA", "LFHD", 0, 2000)
+
+
+def test_scene_object_reads_are_bounded_and_typed(monkeypatch):
+    scene = FakeScene()
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+
+    listed = runtime.list_scene_objects(max_objects=1)
+    assert listed["object_count"] == 2
+    assert listed["truncated"] is True
+    assert listed["objects"] == [
+        {
+            "name": "Actor",
+            "path": "/Actor",
+            "type": "Character",
+            "showing": True,
+            "selectable": True,
+        }
+    ]
+    assert runtime.list_scene_objects(object_type="Marker")["objects"][0]["name"] == "LFHD"
+
+    details = runtime.scene_object_details("/Actor", frame=42, max_children=1)
+    assert details["translation"] == [1.0, 2.0, 3.0]
+    assert details["rotation"] == [10.0, 20.0, 30.0]
+    assert details["scale"] == [1.0, 1.0, 1.0]
+    assert details["children"][0]["path"] == "/Actor/LFHD"
+    assert details["parent"] is None
+
+
+def test_scene_selection_and_display_updates_are_explicit(monkeypatch):
+    scene = FakeScene()
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+
+    selected = runtime.inspect_object_selection()
+    assert selected["primary_object"]["path"] == "/Actor"
+    result = runtime.select_scene_object("/Actor/LFHD", replace=True)
+    assert result["object"]["name"] == "LFHD"
+    assert scene.selected == [scene.marker]
+    assert runtime.clear_object_selection() == {"selection_cleared": True}
+
+    updated = runtime.set_scene_object_display(
+        "/Actor/LFHD", showing=False, selectable=False, opacity=0.25
+    )
+    assert updated["previous"] == {"showing": True, "selectable": True, "opacity": 1.0}
+    assert updated["current"] == {"showing": False, "selectable": False, "opacity": 0.25}
+    assert scene.marker.Showing is False
+    assert scene.marker.Selectable is False
+    assert scene.marker.Opacity == 0.25
+
+    with pytest.raises(ValueError, match="at least one"):
+        runtime.set_scene_object_display("/Actor")
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        runtime.set_scene_object_display("/Actor", opacity=2.0)
+    with pytest.raises(ValueError, match="not found"):
+        runtime.scene_object_details("/Missing", frame=42)
+
+
+def test_scene_selection_restores_previous_values_after_failure(monkeypatch):
+    scene = FakeScene()
+    original_select = scene.SelectObject
+
+    def fail_for_marker(value):
+        if value is scene.marker:
+            raise RuntimeError("vendor failure")
+        original_select(value)
+
+    scene.SelectObject = fail_for_marker
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+
+    with pytest.raises(RuntimeError, match="vendor failure"):
+        runtime.select_scene_object("/Actor/LFHD", replace=True)
+    assert scene.selected == [scene.root]
+
+
+def test_scene_display_restores_previous_values_after_partial_failure(monkeypatch):
+    scene = FakeScene()
+    original_class = scene.marker.__class__
+
+    class FailingDisplayObject(original_class):
+        @property
+        def Selectable(self):
+            return self._selectable
+
+        @Selectable.setter
+        def Selectable(self, value):
+            if hasattr(self, "_selectable") and value is False:
+                raise RuntimeError("vendor failure")
+            self._selectable = value
+
+    failing = FailingDisplayObject("LFHD", "/Actor/LFHD", "Marker", scene.root)
+    scene.marker = failing
+    scene.Objects = FakeObjectList([scene.root, failing])
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+
+    with pytest.raises(RuntimeError, match="vendor failure"):
+        runtime.set_scene_object_display("/Actor/LFHD", showing=False, selectable=False)
+    assert failing.Showing is True
+    assert failing.Selectable is True
 
 
 def test_file_operations_validate_paths_and_return_only_safe_labels(client, tmp_path):
@@ -335,6 +558,45 @@ def test_timeline_mutations_require_explicit_ordered_frames(monkeypatch):
         runtime.set_current_frame(-1)
 
 
+def test_animation_range_and_playback_map_to_timeline(monkeypatch):
+    timeline = FakeTimeline()
+    monkeypatch.setattr(runtime, "official_interface", lambda name: timeline)
+
+    assert runtime.set_animation_range(5, 90) == {"start_frame": 5, "end_frame": 90}
+    assert runtime.start_playback() == {"playing": True}
+    assert runtime.stop_playback() == {"playing": False}
+    assert timeline.calls == [
+        ("SetAnimationStart", 5),
+        ("SetAnimationEnd", 90),
+        ("Play",),
+        ("Stop",),
+    ]
+
+
+def test_animation_range_restores_previous_values_after_partial_failure(monkeypatch):
+    timeline = FakeTimeline()
+    end_calls = 0
+
+    def fail_once(frame):
+        nonlocal end_calls
+        end_calls += 1
+        timeline.calls.append(("SetAnimationEnd", frame))
+        if end_calls == 1:
+            raise RuntimeError("vendor failure")
+
+    timeline.SetAnimationEnd = fail_once
+    monkeypatch.setattr(runtime, "official_interface", lambda name: timeline)
+
+    with pytest.raises(RuntimeError, match="vendor failure"):
+        runtime.set_animation_range(5, 90)
+    assert timeline.calls == [
+        ("SetAnimationStart", 5),
+        ("SetAnimationEnd", 90),
+        ("SetAnimationStart", 0),
+        ("SetAnimationEnd", 150),
+    ]
+
+
 def test_play_range_restores_previous_values_after_partial_failure(monkeypatch):
     timeline = FakeTimeline()
     end_calls = 0
@@ -390,6 +652,31 @@ def test_play_range_restores_previous_values_after_partial_failure(monkeypatch):
                 "transition_time": 5.0,
             },
         ),
+        (
+            "label_rom",
+            {"standard_deviation": 2.5, "separation_distance": 50.0},
+        ),
+        (
+            "labeling_calibration",
+            {
+                "joint_importance": 1.0,
+                "marker_importance": 2.0,
+                "segment_importance": 3.0,
+                "quality": "Normal",
+                "statistics_mode": "CopyTemplate",
+                "calibration_mode": "Full",
+                "active_frames": 120,
+            },
+        ),
+        (
+            "circle_fit",
+            {
+                "enabled": True,
+                "store_centroids": False,
+                "enable_video_centroids": True,
+                "thread_count": 4,
+            },
+        ),
     ],
 )
 def test_processing_settings_expose_only_allowlisted_fields(monkeypatch, section, expected):
@@ -425,3 +712,35 @@ def test_processing_steps_forbid_implicit_whole_play_range(monkeypatch):
     with pytest.raises(ValueError, match="current_frame or selected_ranges"):
         runtime.run_processing_step("solve", "play_range", "active")
     assert offline.calls == []
+
+
+def test_official_rom_calibration_and_quick_post_operations(monkeypatch):
+    offline = FakeOffline()
+    monkeypatch.setattr(runtime, "official_interface", lambda name: offline)
+
+    assert runtime.label_rom("active", "current_frame") == {
+        "operation": "label_rom",
+        "subjects": "active",
+        "range_mode": "current_frame",
+    }
+    assert runtime.calibrate_subjects("solving", "selected", "selected_ranges") == {
+        "operation": "calibrate_subjects",
+        "skeleton": "solving",
+        "subjects": "selected",
+        "range_mode": "selected_ranges",
+    }
+    assert runtime.quick_post("retarget", "selected_ranges") == {
+        "operation": "quick_post",
+        "process_level": "retarget",
+        "range_mode": "selected_ranges",
+    }
+    assert offline.calls == [
+        ("LabelROM", "SubjectsActive", "CurrentFrame"),
+        ("CalibrateSolvingSubjects", "SubjectsSelected", "SelectedRanges"),
+        ("QuickPost", "Retarget", "SelectedRanges"),
+    ]
+
+    with pytest.raises(ValueError, match="process_level"):
+        runtime.quick_post("arbitrary", "current_frame")
+    with pytest.raises(ValueError, match="skeleton"):
+        runtime.calibrate_subjects("arbitrary", "active", "play_range")

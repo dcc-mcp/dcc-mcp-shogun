@@ -96,6 +96,146 @@ tools:
     next-tools:
       on-failure: [shogun_scene__list_markers, shogun_scene__inspect_scene]
 
+  - name: list_scene_objects
+    description: List a bounded set of official Scene objects, optionally filtered by exact Vicon type.
+    source_file: scripts/list_scene_objects.py
+    input_schema:
+      type: object
+      properties:
+        max_objects: {type: integer, minimum: 1, maximum: 10000, default: 500}
+        object_type: {type: string, maxLength: 128, default: ""}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 15
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-success: [shogun_scene__get_scene_object_details]
+      on-failure: [shogun_scene__inspect_scene]
+
+  - name: get_scene_object_details
+    description: Read one explicit Scene object's hierarchy and transforms at one frame.
+    source_file: scripts/get_scene_object_details.py
+    input_schema:
+      type: object
+      required: [object_path, frame]
+      properties:
+        object_path: {type: string, minLength: 1, maxLength: 2048}
+        frame: {type: integer, minimum: 0, maximum: 2147483647}
+        max_children: {type: integer, minimum: 1, maximum: 10000, default: 100}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 15
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-failure: [shogun_scene__list_scene_objects, shogun_scene__inspect_scene]
+
+  - name: inspect_object_selection
+    description: Read the bounded selected-object set and primary Scene object.
+    source_file: scripts/inspect_object_selection.py
+    input_schema:
+      type: object
+      properties:
+        max_objects: {type: integer, minimum: 1, maximum: 10000, default: 500}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 15
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+
+  - name: select_scene_object
+    description: Select one explicit Scene object, replacing the existing selection by default.
+    source_file: scripts/select_scene_object.py
+    input_schema:
+      type: object
+      required: [object_path]
+      properties:
+        object_path: {type: string, minLength: 1, maxLength: 2048}
+        replace: {type: boolean, default: true}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 15
+    annotations:
+      read_only_hint: false
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-success: [shogun_scene__inspect_object_selection]
+      on-failure: [shogun_scene__list_scene_objects]
+
+  - name: clear_object_selection
+    description: Clear the official Scene object selection without changing motion data.
+    source_file: scripts/clear_object_selection.py
+    input_schema:
+      type: object
+      properties: {}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 15
+    annotations:
+      read_only_hint: false
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+
+  - name: set_scene_object_display
+    description: Set one or more allowlisted display properties on an explicit Scene object.
+    source_file: scripts/set_scene_object_display.py
+    input_schema:
+      type: object
+      required: [object_path]
+      properties:
+        object_path: {type: string, minLength: 1, maxLength: 2048}
+        showing: {type: boolean}
+        selectable: {type: boolean}
+        opacity: {type: number, minimum: 0, maximum: 1}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 15
+    annotations:
+      read_only_hint: false
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-success: [shogun_scene__get_scene_object_details]
+      on-failure: [shogun_scene__list_scene_objects]
+
   - name: get_bone_details
     description: Read the parent and a bounded child list for one explicit skeleton bone.
     source_file: scripts/get_bone_details.py

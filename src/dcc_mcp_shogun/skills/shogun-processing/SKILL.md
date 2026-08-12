@@ -2,10 +2,10 @@
 name: shogun-processing
 description: >-
   Inspect processing settings and run explicit, bounded Vicon Shogun Post
-  reconstruction, labeling, occlusion fixing, solving, or retargeting through
-  Vicon's official Offline SDK interface. Use only after inspecting the scene
-  and choosing the current frame or selected time ranges. Never defaults to the
-  complete play range.
+  reconstruction, ROM labeling, subject calibration, labeling, occlusion
+  fixing, solving, QuickPost, or retargeting through Vicon's official Offline
+  SDK interface. Use only after inspecting the scene and choosing an explicit
+  supported time scope. Never silently defaults to the complete play range.
 license: MIT
 metadata:
   dcc-mcp:
@@ -15,8 +15,8 @@ metadata:
     version: "0.2.0" # x-release-please-version
     tags: [motion-capture, animation, vicon, processing]
     search-hint: >-
-      Vicon Shogun Post reconstruct auto label fix occlusion solve retarget
-      processing settings selected ranges current frame
+      Vicon Shogun Post reconstruct label ROM calibrate labeling solving subject
+      auto label fix occlusion solve QuickPost retarget processing settings ranges
     tools: tools.yaml
 ---
 
@@ -27,9 +27,10 @@ settings. For `selected_ranges`, first establish an explicit range with
 `shogun-timeline__select_time_range`.
 
 Every processing tool is a closed wrapper over one official `Offline` method.
-No arbitrary HSL or Python is accepted. The input schema deliberately exposes
-only `current_frame` and `selected_ranges`; processing the full play range is not
-an implicit or available default.
+No arbitrary HSL or Python is accepted. General processing and QuickPost expose
+only `current_frame` and `selected_ranges`. ROM labeling and calibration expose
+the exact ranges documented for those vendor methods, but always require the
+caller to state `play_range` explicitly; it is never an implicit default.
 
 Processing changes scene data and can affect many keys. Save to a new VDF path
 before a production run. A host may expose the SDK surface yet reject a command;
