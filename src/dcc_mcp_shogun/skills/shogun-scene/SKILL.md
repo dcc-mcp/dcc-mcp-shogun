@@ -11,7 +11,7 @@ metadata:
     dcc: shogun
     layer: domain
     compatibility: "Python 3.9+; Vicon Shogun Post with the official local SDK"
-    version: "0.1.0"
+    version: "0.1.0" # x-release-please-version
     tags: [motion-capture, animation, vicon, read-only]
     search-hint: >-
       Vicon Shogun Post mocap scene subjects markers skeleton bones trajectory
@@ -26,9 +26,9 @@ the local Shogun Post control stream and never expose arbitrary Python or HSL
 execution.
 
 Start with `inspect_scene`, then use the returned subject names for marker,
-skeleton, or trajectory queries. This initial public contract is deliberately
-read-only because the installed Shogun Post 1.19 host rejected SDK mutation
-commands during real-host validation.
+skeleton, constraint, subject-parameter, or trajectory queries. This Skill is
+read-only. Use the separate `shogun-files` Skill for the three explicitly
+bounded file mutations implemented through the official SDK.
 
 Paths returned by tools are reduced to file names. Adapter diagnostics must not
 publish SDK install directories, machine names, credentials, or full production

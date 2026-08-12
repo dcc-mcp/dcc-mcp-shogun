@@ -95,3 +95,158 @@ tools:
       deferred_hint: false
     next-tools:
       on-failure: [shogun_scene__list_markers, shogun_scene__inspect_scene]
+
+  - name: get_bone_details
+    description: Read the parent and a bounded child list for one explicit skeleton bone.
+    source_file: scripts/get_bone_details.py
+    input_schema:
+      type: object
+      required: [subject, bone, skeleton]
+      properties:
+        subject: {type: string, minLength: 1, maxLength: 512}
+        bone: {type: string, minLength: 1, maxLength: 512}
+        skeleton: {type: string, enum: [Labeling, Solving]}
+        max_children: {type: integer, minimum: 1, maximum: 10000, default: 1000}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 10
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-failure: [shogun_scene__list_bones, shogun_scene__inspect_scene]
+
+  - name: list_constraints
+    description: List a bounded set of constraint names for one explicit subject skeleton.
+    source_file: scripts/list_constraints.py
+    input_schema:
+      type: object
+      required: [subject, skeleton]
+      properties:
+        subject: {type: string, minLength: 1, maxLength: 512}
+        skeleton: {type: string, enum: [Labeling, Solving]}
+        max_constraints: {type: integer, minimum: 1, maximum: 10000, default: 1000}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 10
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-success: [shogun_scene__get_constraint_details]
+      on-failure: [shogun_scene__inspect_scene]
+
+  - name: get_constraint_details
+    description: Read the active state, nodes, offset, and type of one skeleton constraint.
+    source_file: scripts/get_constraint_details.py
+    input_schema:
+      type: object
+      required: [subject, constraint, skeleton]
+      properties:
+        subject: {type: string, minLength: 1, maxLength: 512}
+        constraint: {type: string, minLength: 1, maxLength: 512}
+        skeleton: {type: string, enum: [Labeling, Solving]}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 10
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-failure: [shogun_scene__list_constraints, shogun_scene__inspect_scene]
+
+  - name: list_subject_parameters
+    description: List a bounded set of static parameter names for one subject skeleton.
+    source_file: scripts/list_subject_parameters.py
+    input_schema:
+      type: object
+      required: [subject, skeleton]
+      properties:
+        subject: {type: string, minLength: 1, maxLength: 512}
+        skeleton: {type: string, enum: [Labeling, Solving]}
+        max_parameters: {type: integer, minimum: 1, maximum: 10000, default: 1000}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 10
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-success: [shogun_scene__get_subject_parameter]
+      on-failure: [shogun_scene__inspect_scene]
+
+  - name: get_subject_parameter
+    description: Read one static subject parameter with its unit, default, and required state.
+    source_file: scripts/get_subject_parameter.py
+    input_schema:
+      type: object
+      required: [subject, parameter, skeleton]
+      properties:
+        subject: {type: string, minLength: 1, maxLength: 512}
+        parameter: {type: string, minLength: 1, maxLength: 512}
+        skeleton: {type: string, enum: [Labeling, Solving]}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 10
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-failure: [shogun_scene__list_subject_parameters, shogun_scene__inspect_scene]
+
+  - name: get_trajectory_window
+    description: Read an inclusive, bounded window of at most 2000 marker trajectory frames.
+    source_file: scripts/get_trajectory_window.py
+    input_schema:
+      type: object
+      required: [subject, marker, start_frame, end_frame]
+      properties:
+        subject: {type: string, minLength: 1, maxLength: 512}
+        marker: {type: string, minLength: 1, maxLength: 512}
+        start_frame: {type: integer, minimum: 0}
+        end_frame: {type: integer, minimum: 0}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: true
+    next-tools:
+      on-failure: [shogun_scene__list_markers, shogun_scene__inspect_scene]
