@@ -11,18 +11,22 @@ from dcc_mcp_shogun.server import ShogunMcpServer, _parse_args, _process_is_aliv
 def test_version_metadata_is_synchronized():
     root = Path(__file__).parents[1]
     assert f'version = "{__version__}"' in (root / "pyproject.toml").read_text(encoding="utf-8")
+    assert "x-release-please-version" in (
+        root / "src" / "dcc_mcp_shogun" / "__version__.py"
+    ).read_text(encoding="utf-8")
     manifest = json.loads((root / ".release-please-manifest.json").read_text(encoding="utf-8"))
     assert manifest["."] == __version__
 
 
-def test_bundled_skill_exists():
-    root = Path(__file__).parents[1] / "src" / "dcc_mcp_shogun" / "skills" / "shogun-scene"
-    assert (root / "SKILL.md").is_file()
-    assert (root / "tools.yaml").is_file()
+def test_bundled_skills_exist():
+    root = Path(__file__).parents[1] / "src" / "dcc_mcp_shogun" / "skills"
+    for name in ("shogun-scene", "shogun-files"):
+        assert (root / name / "SKILL.md").is_file()
+        assert (root / name / "tools.yaml").is_file()
 
 
-def test_public_skill_contract_is_read_only():
-    skill = (
+def test_scene_skill_is_read_only_and_file_skill_is_narrowly_mutating():
+    scene_skill = (
         Path(__file__).parents[1]
         / "src"
         / "dcc_mcp_shogun"
@@ -30,10 +34,43 @@ def test_public_skill_contract_is_read_only():
         / "shogun-scene"
         / "tools.yaml"
     ).read_text(encoding="utf-8")
-    assert skill.count("  - name:") == 4
-    for mutation in ("new_scene", "load_file", "save_file", "import_motion", "set_trajectory"):
-        assert mutation not in skill
-    assert "read_only_hint: false" not in skill
+    assert scene_skill.count("  - name:") == 10
+    for mutation in ("new_scene", "load_file", "save_scene", "import_motion", "set_trajectory"):
+        assert mutation not in scene_skill
+    assert "read_only_hint: false" not in scene_skill
+
+    files_skill = (
+        Path(__file__).parents[1]
+        / "src"
+        / "dcc_mcp_shogun"
+        / "skills"
+        / "shogun-files"
+        / "tools.yaml"
+    ).read_text(encoding="utf-8")
+    assert files_skill.count("  - name:") == 3
+    assert "new_scene" not in files_skill
+    assert "load_file" not in files_skill
+    assert files_skill.count("destructive_hint: true") == 3
+    assert "additionalProperties: false" in files_skill
+
+
+def test_release_sources_are_synchronized_by_release_please():
+    root = Path(__file__).parents[1]
+    config = (root / "release-please-config.json").read_text(encoding="utf-8")
+    for path in (
+        "pyproject.toml",
+        "src/dcc_mcp_shogun/__version__.py",
+        "src/dcc_mcp_shogun/skills/shogun-scene/SKILL.md",
+        "src/dcc_mcp_shogun/skills/shogun-files/SKILL.md",
+    ):
+        assert path in config
+
+
+def test_documentation_images_are_excluded_from_sdist():
+    pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    assert '"docs/**/*.png"' in pyproject
+    assert '"docs/**/*.svg"' in pyproject
+    assert '"docs/**/*.webp"' in pyproject
 
 
 def test_showcase_assets_are_present_and_bounded():
@@ -42,6 +79,19 @@ def test_showcase_assets_are_present_and_bounded():
     motion = root / "examples" / "showcase" / "assets" / "dcc-mcp-shogun-showcase.bvh"
     assert image.is_file() and image.stat().st_size < 500 * 1024
     assert motion.is_file() and motion.stat().st_size < 500 * 1024
+
+
+def test_shogun_119_file_operation_boundary_is_disclosed():
+    root = Path(__file__).parents[1]
+    documents = (
+        root / "README.md",
+        root / "docs" / "showcase.md",
+        root / "src" / "dcc_mcp_shogun" / "skills" / "shogun-files" / "SKILL.md",
+    )
+    for document in documents:
+        text = document.read_text(encoding="utf-8")
+        assert "1.19" in text
+        assert "ControlError" in text
 
 
 def test_server_options_bind_the_real_host_pid(monkeypatch, tmp_path):

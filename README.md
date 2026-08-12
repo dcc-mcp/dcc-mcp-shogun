@@ -6,13 +6,14 @@
 [![PyPI](https://img.shields.io/pypi/v/dcc-mcp-shogun.svg)](https://pypi.org/project/dcc-mcp-shogun/)
 [![Python](https://img.shields.io/pypi/pyversions/dcc-mcp-shogun.svg)](https://pypi.org/project/dcc-mcp-shogun/)
 
-A typed, local-first DCC-MCP adapter for Vicon Shogun Post motion-capture inspection.
+A typed, local-first DCC-MCP adapter for Vicon Shogun Post motion-capture
+inspection and bounded file workflows.
 
 ![Motion data to typed tools to verified scene](docs/images/shogun-scene-showcase.webp)
 
 The adapter uses Vicon's official local `ViconShogunPost` control-stream SDK
 for scene and trajectory inspection. It does not expose arbitrary Python or HSL
-execution. Application controls not verified through the SDK remain an explicit,
+execution. Application controls not exposed by the SDK remain an explicit,
 exact-window DCC UI Control fallback.
 
 Shogun Post ships an external Python SDK. The adapter runs in its own Python
@@ -22,13 +23,25 @@ on a general-purpose Python interpreter embedded in the Shogun Post UI.
 ## Capabilities
 
 - inspect path-redacted scene metadata and bounded subject lists;
-- list subject markers and labeling/solving skeleton bones;
-- query one marker trajectory value at one frame;
+- inspect subject markers, skeleton hierarchy, constraints, and static subject
+  parameters;
+- query one marker trajectory value or an inclusive window of at most 2,000
+  frames;
+- expose capability-gated import, save, and export calls that map directly to
+  the official SDK;
 - register one Shogun Post GUI instance with the DCC-MCP local gateway.
 
-The initial public tool contract is deliberately read-only. The official SDK
-declares mutation APIs, but the tested Shogun Post 1.19 host rejected those
-commands. They will not be exposed until a compatible host path is proven.
+The mutating surface is deliberately narrow. It does not expose scene
+replacement, arbitrary HSL/Python execution, or raw trajectory writes.
+Existing outputs fail closed unless `overwrite=true`, and public results omit
+full paths.
+
+The read-only `shogun-scene` Skill is live-validated against Shogun Post 1.19.
+That host build rejected the SDK's `ImportFile` call with `ControlError`, without
+partially changing the scene. The separate `shogun-files` Skill therefore
+remains explicitly host-build and license-capability gated: its tools are typed
+and fail closed, but import/save/export are not claimed as live-supported on
+1.19.
 
 ## Showcase
 
@@ -41,12 +54,10 @@ inspection, and evidence workflow.
 
 ## Local development
 
-Start Vicon Shogun Post with your studio's normal package or application
-launcher. Then install this adapter in a Python environment that can import
-`dcc-mcp-core`:
+Start Vicon Shogun Post with your normal application launcher. Then install
+this adapter in a Python environment that can import `dcc-mcp-core`:
 
 ```powershell
-thm +p vicon_shogun_post run shogunpost
 python -m pip install -e ".[dev]"
 dcc-mcp-shogun --host-pid <SHOGUN_POST_PID>
 ```
@@ -76,7 +87,8 @@ python -m build
 - Connections are limited to the local Shogun control stream.
 - Tool results reduce file paths to base names.
 - Errors report exception classes, not SDK install paths or machine details.
-- The published scene skill is read-only; mutations remain outside its contract.
+- The scene Skill is read-only; the file Skill exposes only bounded
+  import/save/export operations.
 - Authentication, licensing, UAC, and security dialogs are never automated.
 
 Vicon and Shogun are trademarks of Vicon Motion Systems Ltd. This independent
