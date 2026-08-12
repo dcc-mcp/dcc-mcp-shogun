@@ -36,6 +36,20 @@ _PROCESS_OPERATIONS = {
     "solve": "Solve",
     "retarget": "Retarget",
 }
+_CALIBRATION_RANGE_MODES = {
+    "play_range": "PlayRange",
+    "selected_ranges": "SelectedRanges",
+}
+_ROM_RANGE_MODES = {
+    "play_range": "PlayRange",
+    "current_frame": "CurrentFrame",
+}
+_QUICK_POST_LEVELS = {
+    "reconstruct": "Reconstruct",
+    "label": "Label",
+    "solve": "Solve",
+    "retarget": "Retarget",
+}
 
 
 def _file_label(value: str) -> str:
@@ -47,6 +61,40 @@ def _required_name(value: str, label: str) -> str:
     if not normalized:
         raise ValueError("{} is required".format(label))
     return normalized
+
+
+def _bounded_text(value: str, *, label: str, maximum: int) -> str:
+    normalized = _required_name(value, label)
+    if len(normalized) > maximum:
+        raise ValueError("{} must contain at most {} characters".format(label, maximum))
+    if "\x00" in normalized or "\n" in normalized or "\r" in normalized:
+        raise ValueError("{} contains unsupported control characters".format(label))
+    return normalized
+
+
+def _scene_object(scene: Any, object_path: str) -> Any:
+    path = _bounded_text(object_path, label="object_path", maximum=2048)
+    value = scene.Objects[path]
+    if value is None:
+        raise ValueError("scene object was not found")
+    return value
+
+
+def _object_summary(value: Any) -> Dict[str, Any]:
+    return {
+        "name": str(value.Name),
+        "path": str(value.Path),
+        "type": str(value.Type),
+        "showing": bool(value.Showing),
+        "selectable": bool(value.Selectable),
+    }
+
+
+def _vector_value(channel: Any, frame: int) -> List[float]:
+    value = channel[frame]
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        raise RuntimeError("Shogun returned an invalid three-component channel value")
+    return [float(component) for component in value]
 
 
 def _validated_skeleton(skeleton: str) -> str:
@@ -316,6 +364,137 @@ def trajectory_window(
     }
 
 
+def list_scene_objects(
+    max_objects: int = 500,
+    object_type: str = "",
+) -> Dict[str, Any]:
+    """List a bounded set of objects through Vicon's official Scene interface."""
+    _bounded_limit(max_objects, label="max_objects", maximum=10000)
+    scene = official_interface("Scene")
+    if object_type:
+        normalized_type = _bounded_text(object_type, label="object_type", maximum=128)
+        values = list(scene.Objects.FilterByType(normalized_type))
+    else:
+        normalized_type = None
+        values = list(scene.Objects.ToList())
+    return {
+        "object_type": normalized_type,
+        "objects": [_object_summary(value) for value in values[:max_objects]],
+        "object_count": len(values),
+        "truncated": len(values) > max_objects,
+    }
+
+
+def scene_object_details(
+    object_path: str,
+    frame: int,
+    max_children: int = 100,
+) -> Dict[str, Any]:
+    """Read hierarchy and transform channels for one explicit object and frame."""
+    frame = _validated_frame(frame, label="frame")
+    _bounded_limit(max_children, label="max_children", maximum=10000)
+    scene = official_interface("Scene")
+    value = _scene_object(scene, object_path)
+    parent = value.GetParent()
+    children = list(value.GetChildren())
+    return {
+        **_object_summary(value),
+        "frame": frame,
+        "translation": _vector_value(value.Translation, frame),
+        "rotation": _vector_value(value.Rotation, frame),
+        "scale": _vector_value(value.Scale, frame),
+        "parent": _object_summary(parent) if parent is not None else None,
+        "children": [_object_summary(child) for child in children[:max_children]],
+        "child_count": len(children),
+        "children_truncated": len(children) > max_children,
+    }
+
+
+def inspect_object_selection(max_objects: int = 500) -> Dict[str, Any]:
+    """Read a bounded object selection snapshot."""
+    _bounded_limit(max_objects, label="max_objects", maximum=10000)
+    scene = official_interface("Scene")
+    selected = list(scene.GetSelectedObjects())
+    primary = scene.GetPrimarySelectedObject()
+    return {
+        "selected_objects": [_object_summary(value) for value in selected[:max_objects]],
+        "selected_count": len(selected),
+        "selected_truncated": len(selected) > max_objects,
+        "primary_object": _object_summary(primary) if primary is not None else None,
+    }
+
+
+def select_scene_object(object_path: str, *, replace: bool = True) -> Dict[str, Any]:
+    """Select one object, restoring the previous selection after a failed replacement."""
+    scene = official_interface("Scene")
+    value = _scene_object(scene, object_path)
+    previous = list(scene.GetSelectedObjects()) if replace else []
+    if replace:
+        scene.DeselectAllObjects()
+    try:
+        scene.SelectObject(value)
+    except Exception:
+        if replace:
+            try:
+                scene.DeselectAllObjects()
+                for previous_value in previous:
+                    scene.SelectObject(previous_value)
+            except Exception:
+                pass
+        raise
+    return {"object": _object_summary(value), "replaced_existing_selection": bool(replace)}
+
+
+def clear_object_selection() -> Dict[str, Any]:
+    official_interface("Scene").DeselectAllObjects()
+    return {"selection_cleared": True}
+
+
+def set_scene_object_display(
+    object_path: str,
+    *,
+    showing: Union[bool, None] = None,
+    selectable: Union[bool, None] = None,
+    opacity: Union[float, None] = None,
+) -> Dict[str, Any]:
+    """Apply an allowlisted display update with best-effort transactional rollback."""
+    if showing is None and selectable is None and opacity is None:
+        raise ValueError("at least one display property is required")
+    if opacity is not None and not 0.0 <= float(opacity) <= 1.0:
+        raise ValueError("opacity must be between 0 and 1")
+
+    scene = official_interface("Scene")
+    value = _scene_object(scene, object_path)
+    previous = {
+        "showing": bool(value.Showing),
+        "selectable": bool(value.Selectable),
+        "opacity": float(value.Opacity),
+    }
+    requested = {
+        "showing": showing,
+        "selectable": selectable,
+        "opacity": float(opacity) if opacity is not None else None,
+    }
+    setters = {"showing": "Showing", "selectable": "Selectable", "opacity": "Opacity"}
+    changed: List[str] = []
+    try:
+        for key, property_name in setters.items():
+            if requested[key] is not None:
+                setattr(value, property_name, requested[key])
+                changed.append(key)
+    except Exception:
+        for key in reversed(changed):
+            try:
+                setattr(value, setters[key], previous[key])
+            except Exception:
+                pass
+        raise
+    current = {
+        key: requested[key] if requested[key] is not None else previous[key] for key in setters
+    }
+    return {"object": _object_summary(value), "previous": previous, "current": current}
+
+
 def import_motion(
     file_path: Union[Path, str],
     *,
@@ -430,6 +609,34 @@ def set_play_range(start_frame: int, end_frame: int) -> Dict[str, Any]:
     return {"start_frame": start, "end_frame": end}
 
 
+def set_animation_range(start_frame: int, end_frame: int) -> Dict[str, Any]:
+    start, end = _validated_frame_range(start_frame, end_frame)
+    timeline = official_interface("Timeline")
+    previous_start = int(timeline.GetAnimationStart())
+    previous_end = int(timeline.GetAnimationEnd())
+    timeline.SetAnimationStart(start)
+    try:
+        timeline.SetAnimationEnd(end)
+    except Exception:
+        try:
+            timeline.SetAnimationStart(previous_start)
+            timeline.SetAnimationEnd(previous_end)
+        except Exception:
+            pass
+        raise
+    return {"start_frame": start, "end_frame": end}
+
+
+def start_playback() -> Dict[str, Any]:
+    official_interface("Timeline").Play()
+    return {"playing": True}
+
+
+def stop_playback() -> Dict[str, Any]:
+    official_interface("Timeline").Stop()
+    return {"playing": False}
+
+
 def inspect_processing_settings(section: str) -> Dict[str, Any]:
     """Read only stable, allowlisted fields from official processing settings."""
     offline = official_interface("Offline")
@@ -461,7 +668,82 @@ def inspect_processing_settings(section: str) -> Dict[str, Any]:
             "data_fidelity": float(settings.DataFidelity),
             "transition_time": float(settings.TransitionTime),
         }
-    raise ValueError("section must be reconstruct, solving, or occlusion")
+    if section == "label_rom":
+        settings = offline.GetLabelROMSettings()
+        return {
+            "section": section,
+            "standard_deviation": float(settings.StandardDeviation),
+            "separation_distance": float(settings.SeparationDistance),
+        }
+    if section == "labeling_calibration":
+        settings = offline.GetLabelingSubjectCalibrationSettings()
+        return {
+            "section": section,
+            "joint_importance": float(settings.JointImportance),
+            "marker_importance": float(settings.MarkerImportance),
+            "segment_importance": float(settings.SegmentImportance),
+            "quality": str(settings.Quality),
+            "statistics_mode": str(settings.StatsMode),
+            "calibration_mode": str(settings.CalibrationMode),
+            "active_frames": int(settings.ActiveFrames),
+        }
+    if section == "circle_fit":
+        settings = offline.GetCircleFitSettings()
+        return {
+            "section": section,
+            "enabled": bool(settings.Enabled),
+            "store_centroids": bool(settings.StoreCentroids),
+            "enable_video_centroids": bool(settings.EnableVideoCentroids),
+            "thread_count": int(settings.NumThreads),
+        }
+    raise ValueError(
+        "section must be reconstruct, solving, occlusion, label_rom, "
+        "labeling_calibration, or circle_fit"
+    )
+
+
+def label_rom(subjects: str, range_mode: str) -> Dict[str, Any]:
+    vendor_subjects = _SUBJECT_MODES.get(subjects)
+    if vendor_subjects is None:
+        raise ValueError("subjects must be active or selected")
+    vendor_range = _ROM_RANGE_MODES.get(range_mode)
+    if vendor_range is None:
+        raise ValueError("range_mode must be current_frame or play_range")
+    official_interface("Offline").LabelROM(vendor_subjects, vendor_range)
+    return {"operation": "label_rom", "subjects": subjects, "range_mode": range_mode}
+
+
+def calibrate_subjects(skeleton: str, subjects: str, range_mode: str) -> Dict[str, Any]:
+    if skeleton not in {"labeling", "solving"}:
+        raise ValueError("skeleton must be labeling or solving")
+    vendor_subjects = _SUBJECT_MODES.get(subjects)
+    if vendor_subjects is None:
+        raise ValueError("subjects must be active or selected")
+    vendor_range = _CALIBRATION_RANGE_MODES.get(range_mode)
+    if vendor_range is None:
+        raise ValueError("range_mode must be play_range or selected_ranges")
+    offline = official_interface("Offline")
+    method_name = (
+        "CalibrateLabelingSubjects" if skeleton == "labeling" else "CalibrateSolvingSubjects"
+    )
+    getattr(offline, method_name)(vendor_subjects, vendor_range)
+    return {
+        "operation": "calibrate_subjects",
+        "skeleton": skeleton,
+        "subjects": subjects,
+        "range_mode": range_mode,
+    }
+
+
+def quick_post(process_level: str, range_mode: str) -> Dict[str, Any]:
+    vendor_level = _QUICK_POST_LEVELS.get(process_level)
+    if vendor_level is None:
+        raise ValueError("process_level must be reconstruct, label, solve, or retarget")
+    vendor_range = _RANGE_MODES.get(range_mode)
+    if vendor_range is None:
+        raise ValueError("range_mode must be current_frame or selected_ranges")
+    official_interface("Offline").QuickPost(vendor_level, vendor_range)
+    return {"operation": "quick_post", "process_level": process_level, "range_mode": range_mode}
 
 
 def run_processing_step(

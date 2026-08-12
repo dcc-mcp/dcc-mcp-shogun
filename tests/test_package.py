@@ -25,7 +25,7 @@ def test_bundled_skills_exist():
         assert (root / name / "tools.yaml").is_file()
 
 
-def test_scene_skill_is_read_only_and_file_skill_is_narrowly_mutating():
+def test_skills_keep_read_and_mutation_boundaries_explicit():
     root = Path(__file__).parents[1] / "src" / "dcc_mcp_shogun" / "skills"
     scene_skill = (
         Path(__file__).parents[1]
@@ -35,10 +35,12 @@ def test_scene_skill_is_read_only_and_file_skill_is_narrowly_mutating():
         / "shogun-scene"
         / "tools.yaml"
     ).read_text(encoding="utf-8")
-    assert scene_skill.count("  - name:") == 10
+    assert scene_skill.count("  - name:") == 16
     for mutation in ("new_scene", "load_file", "save_scene", "import_motion", "set_trajectory"):
         assert mutation not in scene_skill
-    assert "read_only_hint: false" not in scene_skill
+    assert scene_skill.count("read_only_hint: true") == 13
+    assert scene_skill.count("read_only_hint: false") == 3
+    assert "destructive_hint: true" not in scene_skill
 
     files_skill = (
         Path(__file__).parents[1]
@@ -55,13 +57,14 @@ def test_scene_skill_is_read_only_and_file_skill_is_narrowly_mutating():
     assert "additionalProperties: false" in files_skill
 
     timeline_skill = (root / "shogun-timeline" / "tools.yaml").read_text(encoding="utf-8")
-    assert timeline_skill.count("  - name:") == 5
-    assert timeline_skill.count("additionalProperties: false") == 5
+    assert timeline_skill.count("  - name:") == 8
+    assert timeline_skill.count("additionalProperties: false") == 8
+    assert "destructive_hint: true" not in timeline_skill
 
     processing_skill = (root / "shogun-processing" / "tools.yaml").read_text(encoding="utf-8")
-    assert processing_skill.count("  - name:") == 6
-    assert processing_skill.count("destructive_hint: true") == 5
-    assert "play_range" not in processing_skill
+    assert processing_skill.count("  - name:") == 9
+    assert processing_skill.count("destructive_hint: true") == 8
+    assert "arbitrary" not in processing_skill
 
 
 def test_release_sources_are_synchronized_by_release_please():

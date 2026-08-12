@@ -6,7 +6,7 @@ tools:
       type: object
       required: [section]
       properties:
-        section: {type: string, enum: [reconstruct, solving, occlusion]}
+        section: {type: string, enum: [reconstruct, solving, occlusion, label_rom, labeling_calibration, circle_fit]}
       additionalProperties: false
     output_schema: {type: object}
     execution: sync
@@ -133,6 +133,82 @@ tools:
     affinity: any
     enforce_thread_affinity: true
     timeout_hint_secs: 300
+    annotations:
+      read_only_hint: false
+      destructive_hint: true
+      idempotent_hint: false
+      open_world_hint: false
+      deferred_hint: true
+    next-tools:
+      on-success: [shogun_scene__inspect_scene]
+
+  - name: label_rom
+    description: Label a ROM for active or selected subjects at one frame or the explicit play range.
+    source_file: scripts/label_rom.py
+    input_schema:
+      type: object
+      required: [subjects, range_mode]
+      properties:
+        subjects: {type: string, enum: [active, selected]}
+        range_mode: {type: string, enum: [current_frame, play_range]}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 300
+    annotations:
+      read_only_hint: false
+      destructive_hint: true
+      idempotent_hint: false
+      open_world_hint: false
+      deferred_hint: true
+    next-tools:
+      on-success: [shogun_scene__inspect_scene]
+
+  - name: calibrate_subjects
+    description: Calibrate labeling or solving subjects over an explicit play or selected range.
+    source_file: scripts/calibrate_subjects.py
+    input_schema:
+      type: object
+      required: [skeleton, subjects, range_mode]
+      properties:
+        skeleton: {type: string, enum: [labeling, solving]}
+        subjects: {type: string, enum: [active, selected]}
+        range_mode: {type: string, enum: [play_range, selected_ranges]}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 300
+    annotations:
+      read_only_hint: false
+      destructive_hint: true
+      idempotent_hint: false
+      open_world_hint: false
+      deferred_hint: true
+    next-tools:
+      on-success: [shogun_scene__inspect_scene]
+
+  - name: quick_post
+    description: Run one explicit QuickPost level for only the current frame or selected ranges.
+    source_file: scripts/quick_post.py
+    input_schema:
+      type: object
+      required: [process_level, range_mode]
+      properties:
+        process_level: {type: string, enum: [reconstruct, label, solve, retarget]}
+        range_mode: {type: string, enum: [current_frame, selected_ranges]}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 600
     annotations:
       read_only_hint: false
       destructive_hint: true

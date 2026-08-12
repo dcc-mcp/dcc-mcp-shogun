@@ -17,7 +17,7 @@ DEFAULT_CONTROL_PORT = 803
 CONTROL_PORT_MAX = 899
 _configured_control_port: Optional[int] = None
 _interface_connection: Any = None
-_INTERFACE_CLASSES = {"Offline", "Timeline"}
+_INTERFACE_CLASSES = {"Offline", "Scene", "Timeline"}
 
 
 class _TcpRowOwnerPid(ctypes.Structure):

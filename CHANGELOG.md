@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Add typed, capability-gated official `Scene` object inspection, selection,
+  and display-property tools.
+- Add animation-range and playback controls from the official `Timeline`
+  interface.
+- Add ROM labeling, subject calibration, QuickPost, and expanded processing
+  settings from the official `Offline` interface.
+
 ## [0.2.0](https://github.com/dcc-mcp/dcc-mcp-shogun/compare/v0.1.0...v0.2.0) (2026-08-12)
 
 

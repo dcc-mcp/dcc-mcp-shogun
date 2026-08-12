@@ -75,3 +75,12 @@ def test_official_interface_is_connected_and_allowlisted(monkeypatch):
 
     with pytest.raises(sdk.ShogunSdkError, match="not an enabled SDK interface"):
         sdk.official_interface("Database")
+
+
+def test_official_scene_interface_is_allowlisted(monkeypatch):
+    scene = object()
+    module = types.SimpleNamespace(Scene=lambda: scene)
+    monkeypatch.setitem(sys.modules, "ViconShogunPostSDK.Scene", module)
+    monkeypatch.setattr(sdk, "connect_client", object)
+
+    assert sdk.official_interface("Scene") is scene
