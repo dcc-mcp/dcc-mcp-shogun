@@ -217,3 +217,82 @@ tools:
       deferred_hint: true
     next-tools:
       on-success: [shogun_scene__inspect_scene]
+
+  - name: update_reconstruct_settings
+    description: Update an allowlisted subset of official reconstruction settings with rollback on failure.
+    source_file: scripts/update_reconstruct_settings.py
+    input_schema:
+      type: object
+      properties:
+        min_cameras_to_start: {type: integer, minimum: 2, maximum: 1000}
+        min_cameras_to_continue: {type: integer, minimum: 2, maximum: 1000}
+        min_radius: {type: number, minimum: 0, maximum: 1000000}
+        max_radius: {type: number, minimum: 0, maximum: 1000000}
+      minProperties: 1
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 15
+    annotations:
+      read_only_hint: false
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-success: [shogun_processing__inspect_processing_settings]
+
+  - name: update_occlusion_settings
+    description: Update an allowlisted subset of official occlusion settings with rollback on failure.
+    source_file: scripts/update_occlusion_settings.py
+    input_schema:
+      type: object
+      properties:
+        enabled: {type: boolean}
+        apply_fixed_markers: {type: boolean}
+        marker_smoothing: {type: number, minimum: 0, maximum: 1000000}
+        data_fidelity: {type: number, minimum: 0, maximum: 1000000}
+        transition_time: {type: number, minimum: 0, maximum: 1000000}
+      minProperties: 1
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 15
+    annotations:
+      read_only_hint: false
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-success: [shogun_processing__inspect_processing_settings]
+
+  - name: update_solving_settings
+    description: Update an allowlisted subset of official solving settings with rollback on failure.
+    source_file: scripts/update_solving_settings.py
+    input_schema:
+      type: object
+      properties:
+        prior_importance: {type: number, minimum: 0, maximum: 1000000}
+        mean_pose_ratio: {type: number, minimum: 0, maximum: 1000000}
+        plausibility_importance: {type: number, minimum: 0, maximum: 1000000}
+        thread_count: {type: integer, minimum: 1, maximum: 1024}
+      minProperties: 1
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 15
+    annotations:
+      read_only_hint: false
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-success: [shogun_processing__inspect_processing_settings]

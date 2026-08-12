@@ -25,10 +25,11 @@ Start with `inspect_timeline`. The adapter calls only Vicon's closed `Timeline`
 interface; it does not expose arbitrary HSL or Python execution.
 
 Frame setters require explicit, non-negative values. `select_time_range` replaces
-the current selection by default. Play and animation range setters attempt to
-restore the prior values if the second SDK setter fails. Playback start/stop are
-typed wrappers over `Timeline.Play` and `Timeline.Stop`; they do not change motion
-data.
+the current selection by default. Typed operations also support deselecting one
+range, inverting the selection, and deriving ranges from selected keys. Play and
+animation range setters attempt to restore the prior values if the second SDK
+setter fails. Playback start/stop are typed wrappers over `Timeline.Play` and
+`Timeline.Stop`; they do not change motion data.
 
 This Skill is capability-gated because a Shogun host can ship an SDK surface but
 reject a command for that host application. Such rejections return a bounded

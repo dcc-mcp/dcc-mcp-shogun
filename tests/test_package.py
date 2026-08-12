@@ -35,10 +35,10 @@ def test_skills_keep_read_and_mutation_boundaries_explicit():
         / "shogun-scene"
         / "tools.yaml"
     ).read_text(encoding="utf-8")
-    assert scene_skill.count("  - name:") == 16
+    assert scene_skill.count("  - name:") == 22
     for mutation in ("new_scene", "load_file", "save_scene", "import_motion", "set_trajectory"):
         assert mutation not in scene_skill
-    assert scene_skill.count("read_only_hint: true") == 13
+    assert scene_skill.count("read_only_hint: true") == 19
     assert scene_skill.count("read_only_hint: false") == 3
     assert "destructive_hint: true" not in scene_skill
 
@@ -57,12 +57,12 @@ def test_skills_keep_read_and_mutation_boundaries_explicit():
     assert "additionalProperties: false" in files_skill
 
     timeline_skill = (root / "shogun-timeline" / "tools.yaml").read_text(encoding="utf-8")
-    assert timeline_skill.count("  - name:") == 8
-    assert timeline_skill.count("additionalProperties: false") == 8
+    assert timeline_skill.count("  - name:") == 11
+    assert timeline_skill.count("additionalProperties: false") == 11
     assert "destructive_hint: true" not in timeline_skill
 
     processing_skill = (root / "shogun-processing" / "tools.yaml").read_text(encoding="utf-8")
-    assert processing_skill.count("  - name:") == 9
+    assert processing_skill.count("  - name:") == 12
     assert processing_skill.count("destructive_hint: true") == 8
     assert "arbitrary" not in processing_skill
 

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Union
 
 from .sdk import connect_client, official_interface
 
 MAX_TRAJECTORY_WINDOW = 2000
+MAX_CHANNEL_GAPS = 2000
 MAX_MOTION_FILE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_FRAME = 2_147_483_647
 _SKELETONS = {"Labeling", "Solving"}
@@ -95,6 +97,23 @@ def _vector_value(channel: Any, frame: int) -> List[float]:
     if not isinstance(value, (list, tuple)) or len(value) != 3:
         raise RuntimeError("Shogun returned an invalid three-component channel value")
     return [float(component) for component in value]
+
+
+def _safe_sdk_value(value: Any) -> Any:
+    """Convert one SDK scalar or short vector without exposing opaque objects."""
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise RuntimeError("Shogun returned a non-finite channel value")
+        return value
+    if isinstance(value, str):
+        if len(value) > 4096 or "\x00" in value:
+            raise RuntimeError("Shogun returned an invalid string channel value")
+        return value
+    if isinstance(value, (list, tuple)) and len(value) <= 16:
+        return [_safe_sdk_value(component) for component in value]
+    raise RuntimeError("Shogun returned an unsupported channel value type")
 
 
 def _validated_skeleton(skeleton: str) -> str:
@@ -410,6 +429,108 @@ def scene_object_details(
     }
 
 
+def list_object_attributes(object_path: str, max_attributes: int = 200) -> Dict[str, Any]:
+    """List attribute names only; values may contain private production metadata."""
+    _bounded_limit(max_attributes, label="max_attributes", maximum=1000)
+    value = _scene_object(official_interface("Scene"), object_path)
+    attributes = list(value.Attributes.ToList())
+    names = [str(attribute.Name) for attribute in attributes]
+    return {
+        "object": _object_summary(value),
+        "attributes": names[:max_attributes],
+        "attribute_count": len(names),
+        "truncated": len(names) > max_attributes,
+    }
+
+
+def list_object_channels(object_path: str, max_channels: int = 200) -> Dict[str, Any]:
+    """List channel names without returning motion values."""
+    _bounded_limit(max_channels, label="max_channels", maximum=1000)
+    value = _scene_object(official_interface("Scene"), object_path)
+    channels = list(value.Channels.ToList())
+    names = [str(channel.Name) for channel in channels]
+    return {
+        "object": _object_summary(value),
+        "channels": names[:max_channels],
+        "channel_count": len(names),
+        "truncated": len(names) > max_channels,
+    }
+
+
+def channel_sample(object_path: str, channel_name: str, frame: int) -> Dict[str, Any]:
+    """Read one explicit channel at one explicit frame."""
+    frame = _validated_frame(frame, label="frame")
+    name = _bounded_text(channel_name, label="channel_name", maximum=256)
+    value = _scene_object(official_interface("Scene"), object_path)
+    channel = value.Channels[name]
+    if channel is None:
+        raise ValueError("channel was not found")
+    return {
+        "object": _object_summary(value),
+        "channel": name,
+        "frame": frame,
+        "value": _safe_sdk_value(channel[frame]),
+        "has_key": bool(channel.HasKey(frame)),
+    }
+
+
+def list_channel_gaps(
+    object_path: str,
+    channel_name: str,
+    *,
+    any_subchannel: bool = False,
+    max_gaps: int = 200,
+) -> Dict[str, Any]:
+    """Return a bounded gap summary for one explicit channel."""
+    _bounded_limit(max_gaps, label="max_gaps", maximum=MAX_CHANNEL_GAPS)
+    name = _bounded_text(channel_name, label="channel_name", maximum=256)
+    value = _scene_object(official_interface("Scene"), object_path)
+    channel = value.Channels[name]
+    if channel is None:
+        raise ValueError("channel was not found")
+    gaps = list(channel.GetGaps(bool(any_subchannel)))
+    normalized = [{"start": int(start), "end": int(end)} for start, end in gaps[:max_gaps]]
+    return {
+        "object": _object_summary(value),
+        "channel": name,
+        "any_subchannel": bool(any_subchannel),
+        "gaps": normalized,
+        "gap_count": len(gaps),
+        "truncated": len(gaps) > max_gaps,
+    }
+
+
+def list_optical_cameras(max_cameras: int = 500) -> Dict[str, Any]:
+    """List optical cameras through the vendor Scene type filter."""
+    _bounded_limit(max_cameras, label="max_cameras", maximum=10000)
+    scene = official_interface("Scene")
+    cameras = list(scene.Objects.FilterByType("OpticalCamera"))
+    return {
+        "cameras": [_object_summary(camera) for camera in cameras[:max_cameras]],
+        "camera_count": len(cameras),
+        "truncated": len(cameras) > max_cameras,
+    }
+
+
+def optical_camera_details(object_path: str) -> Dict[str, Any]:
+    """Read stable camera calibration and capture fields, excluding device identifiers."""
+    camera = _scene_object(official_interface("Scene"), object_path)
+    if str(camera.Type) not in {"OpticalCamera", "VideoCamera"}:
+        raise ValueError("scene object is not an optical camera")
+    return {
+        "camera": _object_summary(camera),
+        "camera_number": int(camera.Camera_Number),
+        "enabled": bool(camera.Enabled),
+        "recording_enabled": bool(camera.Record),
+        "model": str(camera.Model),
+        "field_of_view": float(camera.FOV),
+        "focal_length": float(camera.Focal_Length),
+        "sensor_width": int(camera.Sensor_Width),
+        "sensor_height": int(camera.Sensor_Height),
+        "calibration_residual": float(camera.Residual),
+    }
+
+
 def inspect_object_selection(max_objects: int = 500) -> Dict[str, Any]:
     """Read a bounded object selection snapshot."""
     _bounded_limit(max_objects, label="max_objects", maximum=10000)
@@ -591,6 +712,22 @@ def clear_time_selection() -> Dict[str, Any]:
     return {"selection_cleared": True}
 
 
+def deselect_time_range(start_frame: int, end_frame: int) -> Dict[str, Any]:
+    start, end = _validated_frame_range(start_frame, end_frame)
+    official_interface("Timeline").DeselectRange(start, end)
+    return {"start_frame": start, "end_frame": end, "selected": False}
+
+
+def invert_time_selection() -> Dict[str, Any]:
+    official_interface("Timeline").InvertRangeSelection()
+    return {"selection_inverted": True}
+
+
+def select_time_from_keys() -> Dict[str, Any]:
+    official_interface("Timeline").SelectRangeFromKeys()
+    return {"selected_from_keys": True}
+
+
 def set_play_range(start_frame: int, end_frame: int) -> Dict[str, Any]:
     start, end = _validated_frame_range(start_frame, end_frame)
     timeline = official_interface("Timeline")
@@ -700,6 +837,197 @@ def inspect_processing_settings(section: str) -> Dict[str, Any]:
         "section must be reconstruct, solving, occlusion, label_rom, "
         "labeling_calibration, or circle_fit"
     )
+
+
+def _update_settings(
+    getter_name: str,
+    setter_name: str,
+    updates: Dict[str, Any],
+    validators: Dict[str, Any],
+    *,
+    offline: Any = None,
+    settings: Any = None,
+) -> Dict[str, Any]:
+    """Apply allowlisted SDK settings and restore the prior object after failure."""
+    requested = {key: value for key, value in updates.items() if value is not None}
+    if not requested:
+        raise ValueError("at least one processing setting is required")
+    unknown = set(requested) - set(validators)
+    if unknown:
+        raise ValueError("processing setting is not allowlisted")
+    normalized = {key: validators[key](value) for key, value in requested.items()}
+    offline = official_interface("Offline") if offline is None else offline
+    settings = getattr(offline, getter_name)() if settings is None else settings
+    previous = {key: getattr(settings, key) for key in normalized}
+    for key, value in normalized.items():
+        setattr(settings, key, value)
+    try:
+        getattr(offline, setter_name)(settings)
+    except Exception:
+        for key, value in previous.items():
+            setattr(settings, key, value)
+        try:
+            getattr(offline, setter_name)(settings)
+        except Exception:
+            pass
+        raise
+    return {
+        "updated": {key: _safe_sdk_value(value) for key, value in normalized.items()},
+        "previous": {key: _safe_sdk_value(value) for key, value in previous.items()},
+    }
+
+
+def _bounded_float(value: Any, *, label: str, minimum: float, maximum: float) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be a number")
+    normalized = float(value)
+    if not math.isfinite(normalized) or not minimum <= normalized <= maximum:
+        raise ValueError(f"{label} must be between {minimum} and {maximum}")
+    return normalized
+
+
+def _bounded_int(value: Any, *, label: str, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be an integer")
+    normalized = int(value)
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"{label} must be an integer")
+    if not minimum <= normalized <= maximum:
+        raise ValueError(f"{label} must be between {minimum} and {maximum}")
+    return normalized
+
+
+def update_reconstruct_settings(
+    *,
+    min_cameras_to_start: Any = None,
+    min_cameras_to_continue: Any = None,
+    min_radius: Any = None,
+    max_radius: Any = None,
+) -> Dict[str, Any]:
+    updates = {
+        "MinCamsToStartTrajectory": min_cameras_to_start,
+        "MinCamsToContinueTrajectory": min_cameras_to_continue,
+        "MinReconstructionRadius": min_radius,
+        "MaxReconstructionRadius": max_radius,
+    }
+    offline = official_interface("Offline")
+    current = offline.GetReconstructSettings()
+    final_start = (
+        current.MinCamsToStartTrajectory if min_cameras_to_start is None else min_cameras_to_start
+    )
+    final_continue = (
+        current.MinCamsToContinueTrajectory
+        if min_cameras_to_continue is None
+        else min_cameras_to_continue
+    )
+    final_min_radius = current.MinReconstructionRadius if min_radius is None else min_radius
+    final_max_radius = current.MaxReconstructionRadius if max_radius is None else max_radius
+    if int(final_continue) > int(final_start):
+        raise ValueError("min_cameras_to_continue cannot exceed min_cameras_to_start")
+    if float(final_min_radius) > float(final_max_radius):
+        raise ValueError("min_radius cannot exceed max_radius")
+    result = _update_settings(
+        "GetReconstructSettings",
+        "SetReconstructSettings",
+        updates,
+        {
+            "MinCamsToStartTrajectory": lambda value: _bounded_int(
+                value, label="min_cameras_to_start", minimum=2, maximum=1000
+            ),
+            "MinCamsToContinueTrajectory": lambda value: _bounded_int(
+                value, label="min_cameras_to_continue", minimum=2, maximum=1000
+            ),
+            "MinReconstructionRadius": lambda value: _bounded_float(
+                value, label="min_radius", minimum=0.0, maximum=1_000_000.0
+            ),
+            "MaxReconstructionRadius": lambda value: _bounded_float(
+                value, label="max_radius", minimum=0.0, maximum=1_000_000.0
+            ),
+        },
+        offline=offline,
+        settings=current,
+    )
+    return {"section": "reconstruct", **result}
+
+
+def update_occlusion_settings(
+    *,
+    enabled: Any = None,
+    apply_fixed_markers: Any = None,
+    marker_smoothing: Any = None,
+    data_fidelity: Any = None,
+    transition_time: Any = None,
+) -> Dict[str, Any]:
+    result = _update_settings(
+        "GetOcclusionFixingSettings",
+        "SetOcclusionFixingSettings",
+        {
+            "Enabled": enabled,
+            "ApplyFixedMarkers": apply_fixed_markers,
+            "MarkerSmoothing": marker_smoothing,
+            "DataFidelity": data_fidelity,
+            "TransitionTime": transition_time,
+        },
+        {
+            "Enabled": _validated_bool,
+            "ApplyFixedMarkers": _validated_bool,
+            "MarkerSmoothing": lambda value: _bounded_float(
+                value, label="marker_smoothing", minimum=0.0, maximum=1_000_000.0
+            ),
+            "DataFidelity": lambda value: _bounded_float(
+                value, label="data_fidelity", minimum=0.0, maximum=1_000_000.0
+            ),
+            "TransitionTime": lambda value: _bounded_float(
+                value, label="transition_time", minimum=0.0, maximum=1_000_000.0
+            ),
+        },
+    )
+    return {"section": "occlusion", **result}
+
+
+def _raise_bool() -> Any:
+    raise ValueError("boolean processing settings must be true or false")
+
+
+def _validated_bool(value: Any) -> bool:
+    if not isinstance(value, bool):
+        _raise_bool()
+    return value
+
+
+def _importance_validator(label: str) -> Any:
+    def validate(value: Any) -> float:
+        return _bounded_float(value, label=label, minimum=0.0, maximum=1_000_000.0)
+
+    return validate
+
+
+def update_solving_settings(
+    *,
+    prior_importance: Any = None,
+    mean_pose_ratio: Any = None,
+    plausibility_importance: Any = None,
+    thread_count: Any = None,
+) -> Dict[str, Any]:
+    result = _update_settings(
+        "GetSolvingSettings",
+        "SetSolvingSettings",
+        {
+            "PriorImportance": prior_importance,
+            "MeanPoseRatio": mean_pose_ratio,
+            "PlausibilityImportance": plausibility_importance,
+            "NumThreads": thread_count,
+        },
+        {
+            "PriorImportance": _importance_validator("prior_importance"),
+            "MeanPoseRatio": _importance_validator("mean_pose_ratio"),
+            "PlausibilityImportance": _importance_validator("plausibility_importance"),
+            "NumThreads": lambda value: _bounded_int(
+                value, label="thread_count", minimum=1, maximum=1024
+            ),
+        },
+    )
+    return {"section": "solving", **result}
 
 
 def label_rom(subjects: str, range_mode: str) -> Dict[str, Any]:
