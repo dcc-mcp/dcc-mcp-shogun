@@ -28,13 +28,15 @@ on a general-purpose Python interpreter embedded in the Shogun Post UI.
 - query one marker trajectory value or an inclusive window of at most 2,000
   frames;
 - inspect the capability-gated Scene object graph, hierarchy, transforms,
-  selection, visibility, selectability, and opacity;
+  attribute/channel names, bounded channel samples and gaps, optical-camera
+  calibration summaries, selection, visibility, selectability, and opacity;
 - inspect and explicitly change current frame, selected time ranges,
-  play/animation ranges, and playback through the capability-gated `Timeline`
-  interface;
+  range selection derived from keys, play/animation ranges, and playback through
+  the capability-gated `Timeline` interface;
 - inspect a stable allowlist of processing settings and invoke reconstruct,
   ROM labeling, subject calibration, auto-label, occlusion fixing, solve,
-  QuickPost, or retarget through the official `Offline` interface;
+  QuickPost, or retarget through the official `Offline` interface; reconstruction,
+  occlusion, and solving setting updates are allowlisted and rollback-aware;
 - expose capability-gated import, save, and export calls that map directly to
   the official SDK;
 - register one Shogun Post GUI instance with the DCC-MCP local gateway.
@@ -45,7 +47,8 @@ available implicit default. The adapter does not expose scene replacement,
 arbitrary HSL/Python execution, or raw trajectory writes. Existing outputs fail
 closed unless `overwrite=true`, and public results omit full file-system paths.
 The Scene surface does not expose object creation, removal, reparenting, raw
-attribute/channel writes, or raw trajectory mutation.
+attribute/channel writes, or raw trajectory mutation. Attribute values and camera
+device identifiers are intentionally omitted from inspection results.
 
 The subject, marker, skeleton, constraint, parameter, and trajectory queries in
 `shogun-scene` are live-validated against Shogun Post 1.19. The newer official
@@ -111,6 +114,7 @@ python -m build
 - Connections are limited to the local Shogun control stream.
 - Tool results reduce file paths to base names.
 - Errors report exception classes, not SDK install paths or machine details.
+- Attribute inspection returns names only, and camera summaries omit device IDs.
 - The scene Skill limits mutation to selection and display state; the file Skill
   exposes only bounded import/save/export operations; processing never defaults
   to the full play range.

@@ -32,6 +32,10 @@ only `current_frame` and `selected_ranges`. ROM labeling and calibration expose
 the exact ranges documented for those vendor methods, but always require the
 caller to state `play_range` explicitly; it is never an implicit default.
 
+Reconstruction, occlusion, and solving settings expose small typed allowlists.
+Each update requires at least one field, applies documented numeric bounds, and
+attempts to restore all prior values if the official SDK setter fails.
+
 Processing changes scene data and can affect many keys. Save to a new VDF path
 before a production run. A host may expose the SDK surface yet reject a command;
 the adapter reports that capability failure without UI fallback or partial-success

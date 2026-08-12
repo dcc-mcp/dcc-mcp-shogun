@@ -102,6 +102,15 @@ class FakeTimeline:
     def SelectRange(self, start, end):
         self.calls.append(("SelectRange", start, end))
 
+    def DeselectRange(self, start, end):
+        self.calls.append(("DeselectRange", start, end))
+
+    def InvertRangeSelection(self):
+        self.calls.append(("InvertRangeSelection",))
+
+    def SelectRangeFromKeys(self):
+        self.calls.append(("SelectRangeFromKeys",))
+
     def SetPlayStart(self, frame):
         self.calls.append(("SetPlayStart", frame))
 
@@ -196,6 +205,15 @@ class FakeOffline:
             },
         )()
 
+    def SetReconstructSettings(self, settings):
+        self.calls.append(("SetReconstructSettings", settings))
+
+    def SetOcclusionFixingSettings(self, settings):
+        self.calls.append(("SetOcclusionFixingSettings", settings))
+
+    def SetSolvingSettings(self, settings):
+        self.calls.append(("SetSolvingSettings", settings))
+
     def Reconstruct(self, range_mode):
         self.calls.append(("Reconstruct", range_mode))
 
@@ -233,6 +251,36 @@ class FakeVectorChannel:
         return self.value
 
 
+class FakeChannel:
+    def __init__(self, name, value, gaps=()):
+        self.Name = name
+        self._value = value
+        self._gaps = list(gaps)
+
+    def __getitem__(self, frame):
+        assert frame == 42
+        return self._value
+
+    def HasKey(self, frame):
+        assert frame == 42
+        return True
+
+    def GetGaps(self, any_subchannel=False):
+        assert isinstance(any_subchannel, bool)
+        return list(self._gaps)
+
+
+class FakeNamedList:
+    def __init__(self, values):
+        self._values = values
+
+    def __getitem__(self, name):
+        return next((value for value in self._values if value.Name == name), None)
+
+    def ToList(self):
+        return list(self._values)
+
+
 class FakeSceneObject:
     def __init__(self, name, path, object_type, parent=None):
         self.Name = name
@@ -244,6 +292,12 @@ class FakeSceneObject:
         self.Translation = FakeVectorChannel([1.0, 2.0, 3.0])
         self.Rotation = FakeVectorChannel([10.0, 20.0, 30.0])
         self.Scale = FakeVectorChannel([1.0, 1.0, 1.0])
+        self.Attributes = FakeNamedList(
+            [type("Attribute", (), {"Name": "Active", "Value": True})()]
+        )
+        self.Channels = FakeNamedList(
+            [FakeChannel("Translation", [1.0, 2.0, 3.0], [(5, 7), (20, 22)])]
+        )
         self._parent = parent
         self._children = []
 
@@ -290,6 +344,20 @@ class FakeScene:
     def SelectObject(self, value):
         self.calls.append(("SelectObject", value.Path))
         self.selected.append(value)
+
+
+class FakeCamera(FakeSceneObject):
+    def __init__(self):
+        super().__init__("Vero1", "/Cameras/Vero1", "OpticalCamera")
+        self.Camera_Number = 1
+        self.Enabled = True
+        self.Record = True
+        self.Model = "Vero"
+        self.FOV = 70.0
+        self.Focal_Length = 12.5
+        self.Sensor_Width = 2048
+        self.Sensor_Height = 1088
+        self.Residual = 0.15
 
 
 @pytest.fixture
@@ -394,6 +462,43 @@ def test_scene_object_reads_are_bounded_and_typed(monkeypatch):
     assert details["scale"] == [1.0, 1.0, 1.0]
     assert details["children"][0]["path"] == "/Actor/LFHD"
     assert details["parent"] is None
+
+
+def test_object_attributes_channels_samples_and_gaps_are_bounded(monkeypatch):
+    scene = FakeScene()
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+
+    attributes = runtime.list_object_attributes("/Actor", max_attributes=1)
+    assert attributes["attributes"] == ["Active"]
+    assert "Value" not in repr(attributes)
+    channels = runtime.list_object_channels("/Actor", max_channels=1)
+    assert channels["channels"] == ["Translation"]
+    sample = runtime.channel_sample("/Actor", "Translation", 42)
+    assert sample["value"] == [1.0, 2.0, 3.0]
+    assert sample["has_key"] is True
+    gaps = runtime.list_channel_gaps("/Actor", "Translation", any_subchannel=True, max_gaps=1)
+    assert gaps["gaps"] == [{"start": 5, "end": 7}]
+    assert gaps["gap_count"] == 2
+    assert gaps["truncated"] is True
+    scene.root.Channels = FakeNamedList([FakeChannel("Opaque", object())])
+    with pytest.raises(RuntimeError, match="unsupported channel value"):
+        runtime.channel_sample("/Actor", "Opaque", 42)
+    scene.root.Channels = FakeNamedList([FakeChannel("Invalid", float("nan"))])
+    with pytest.raises(RuntimeError, match="non-finite channel value"):
+        runtime.channel_sample("/Actor", "Invalid", 42)
+
+
+def test_optical_camera_inventory_excludes_device_identifier(monkeypatch):
+    camera = FakeCamera()
+    scene = FakeScene()
+    scene.Objects = FakeObjectList([scene.root, camera])
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+
+    assert runtime.list_optical_cameras()["cameras"][0]["name"] == "Vero1"
+    details = runtime.optical_camera_details("/Cameras/Vero1")
+    assert details["camera_number"] == 1
+    assert details["sensor_width"] == 2048
+    assert "device" not in repr(details).lower()
 
 
 def test_scene_selection_and_display_updates_are_explicit(monkeypatch):
@@ -556,6 +661,24 @@ def test_timeline_mutations_require_explicit_ordered_frames(monkeypatch):
         runtime.select_time_range(20, 10)
     with pytest.raises(ValueError, match="non-negative"):
         runtime.set_current_frame(-1)
+
+
+def test_additional_timeline_selection_operations_are_bounded(monkeypatch):
+    timeline = FakeTimeline()
+    monkeypatch.setattr(runtime, "official_interface", lambda name: timeline)
+
+    assert runtime.deselect_time_range(10, 20) == {
+        "start_frame": 10,
+        "end_frame": 20,
+        "selected": False,
+    }
+    assert runtime.invert_time_selection() == {"selection_inverted": True}
+    assert runtime.select_time_from_keys() == {"selected_from_keys": True}
+    assert timeline.calls == [
+        ("DeselectRange", 10, 20),
+        ("InvertRangeSelection",),
+        ("SelectRangeFromKeys",),
+    ]
 
 
 def test_animation_range_and_playback_map_to_timeline(monkeypatch):
@@ -744,3 +867,54 @@ def test_official_rom_calibration_and_quick_post_operations(monkeypatch):
         runtime.quick_post("arbitrary", "current_frame")
     with pytest.raises(ValueError, match="skeleton"):
         runtime.calibrate_subjects("arbitrary", "active", "play_range")
+
+
+def test_allowlisted_processing_settings_updates(monkeypatch):
+    offline = FakeOffline()
+    monkeypatch.setattr(runtime, "official_interface", lambda name: offline)
+
+    reconstruct = runtime.update_reconstruct_settings(min_cameras_to_start=4, max_radius=75.0)
+    assert reconstruct["section"] == "reconstruct"
+    assert reconstruct["updated"] == {
+        "MinCamsToStartTrajectory": 4,
+        "MaxReconstructionRadius": 75.0,
+    }
+    occlusion = runtime.update_occlusion_settings(enabled=False, data_fidelity=0.8)
+    assert occlusion["updated"] == {"Enabled": False, "DataFidelity": 0.8}
+    solving = runtime.update_solving_settings(thread_count=4, prior_importance=1.5)
+    assert solving["updated"] == {"PriorImportance": 1.5, "NumThreads": 4}
+
+    with pytest.raises(ValueError, match="at least one"):
+        runtime.update_solving_settings()
+    with pytest.raises(ValueError, match="between 1 and 1024"):
+        runtime.update_solving_settings(thread_count=0)
+    with pytest.raises(ValueError, match="true or false"):
+        runtime.update_occlusion_settings(enabled="yes")
+    with pytest.raises(ValueError, match="cannot exceed"):
+        runtime.update_reconstruct_settings(min_cameras_to_start=2, min_cameras_to_continue=3)
+    with pytest.raises(ValueError, match="cannot exceed"):
+        runtime.update_reconstruct_settings(min_radius=10.0, max_radius=5.0)
+    with pytest.raises(ValueError, match="between"):
+        runtime.update_solving_settings(prior_importance=float("nan"))
+
+
+def test_processing_settings_restore_after_vendor_failure(monkeypatch):
+    offline = FakeOffline()
+    attempts = 0
+
+    def fail_once(settings):
+        nonlocal attempts
+        attempts += 1
+        offline.calls.append(("SetReconstructSettings", settings.MinCamsToStartTrajectory))
+        if attempts == 1:
+            raise RuntimeError("vendor failure")
+
+    offline.SetReconstructSettings = fail_once
+    monkeypatch.setattr(runtime, "official_interface", lambda name: offline)
+
+    with pytest.raises(RuntimeError, match="vendor failure"):
+        runtime.update_reconstruct_settings(min_cameras_to_start=4)
+    assert offline.calls == [
+        ("SetReconstructSettings", 4),
+        ("SetReconstructSettings", 3),
+    ]

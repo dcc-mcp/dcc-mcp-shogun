@@ -390,3 +390,145 @@ tools:
       deferred_hint: true
     next-tools:
       on-failure: [shogun_scene__list_markers, shogun_scene__inspect_scene]
+
+  - name: list_object_attributes
+    description: List bounded attribute names for one object without returning private attribute values.
+    source_file: scripts/list_object_attributes.py
+    input_schema:
+      type: object
+      required: [object_path]
+      properties:
+        object_path: {type: string, minLength: 1, maxLength: 2048}
+        max_attributes: {type: integer, minimum: 1, maximum: 1000, default: 200}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 15
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+
+  - name: list_object_channels
+    description: List bounded channel names for one explicit Scene object.
+    source_file: scripts/list_object_channels.py
+    input_schema:
+      type: object
+      required: [object_path]
+      properties:
+        object_path: {type: string, minLength: 1, maxLength: 2048}
+        max_channels: {type: integer, minimum: 1, maximum: 1000, default: 200}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 15
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-success: [shogun_scene__get_channel_sample, shogun_scene__list_channel_gaps]
+
+  - name: get_channel_sample
+    description: Read one named channel at one explicit frame and report whether it has a key.
+    source_file: scripts/get_channel_sample.py
+    input_schema:
+      type: object
+      required: [object_path, channel_name, frame]
+      properties:
+        object_path: {type: string, minLength: 1, maxLength: 2048}
+        channel_name: {type: string, minLength: 1, maxLength: 256}
+        frame: {type: integer, minimum: 0, maximum: 2147483647}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 15
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-failure: [shogun_scene__list_object_channels]
+
+  - name: list_channel_gaps
+    description: Return a bounded list of gap ranges for one explicit object channel.
+    source_file: scripts/list_channel_gaps.py
+    input_schema:
+      type: object
+      required: [object_path, channel_name]
+      properties:
+        object_path: {type: string, minLength: 1, maxLength: 2048}
+        channel_name: {type: string, minLength: 1, maxLength: 256}
+        any_subchannel: {type: boolean, default: false}
+        max_gaps: {type: integer, minimum: 1, maximum: 2000, default: 200}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 15
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-failure: [shogun_scene__list_object_channels]
+
+  - name: list_optical_cameras
+    description: List a bounded inventory of official OpticalCamera Scene objects.
+    source_file: scripts/list_optical_cameras.py
+    input_schema:
+      type: object
+      properties:
+        max_cameras: {type: integer, minimum: 1, maximum: 10000, default: 500}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 15
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-success: [shogun_scene__get_optical_camera_details]
+
+  - name: get_optical_camera_details
+    description: Read stable calibration and capture fields for one camera without device identifiers.
+    source_file: scripts/get_optical_camera_details.py
+    input_schema:
+      type: object
+      required: [object_path]
+      properties:
+        object_path: {type: string, minLength: 1, maxLength: 2048}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 15
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-failure: [shogun_scene__list_optical_cameras]
