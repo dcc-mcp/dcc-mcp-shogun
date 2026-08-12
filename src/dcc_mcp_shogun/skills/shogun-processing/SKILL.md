@@ -12,7 +12,7 @@ metadata:
     dcc: shogun
     layer: domain
     compatibility: "Python 3.9+; capability-gated Vicon Shogun Post Offline SDK"
-    version: "0.1.0" # x-release-please-version
+    version: "0.2.0" # x-release-please-version
     tags: [motion-capture, animation, vicon, processing]
     search-hint: >-
       Vicon Shogun Post reconstruct auto label fix occlusion solve retarget
