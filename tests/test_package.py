@@ -20,12 +20,13 @@ def test_version_metadata_is_synchronized():
 
 def test_bundled_skills_exist():
     root = Path(__file__).parents[1] / "src" / "dcc_mcp_shogun" / "skills"
-    for name in ("shogun-scene", "shogun-files"):
+    for name in ("shogun-scene", "shogun-files", "shogun-timeline", "shogun-processing"):
         assert (root / name / "SKILL.md").is_file()
         assert (root / name / "tools.yaml").is_file()
 
 
 def test_scene_skill_is_read_only_and_file_skill_is_narrowly_mutating():
+    root = Path(__file__).parents[1] / "src" / "dcc_mcp_shogun" / "skills"
     scene_skill = (
         Path(__file__).parents[1]
         / "src"
@@ -53,6 +54,15 @@ def test_scene_skill_is_read_only_and_file_skill_is_narrowly_mutating():
     assert files_skill.count("destructive_hint: true") == 3
     assert "additionalProperties: false" in files_skill
 
+    timeline_skill = (root / "shogun-timeline" / "tools.yaml").read_text(encoding="utf-8")
+    assert timeline_skill.count("  - name:") == 5
+    assert timeline_skill.count("additionalProperties: false") == 5
+
+    processing_skill = (root / "shogun-processing" / "tools.yaml").read_text(encoding="utf-8")
+    assert processing_skill.count("  - name:") == 6
+    assert processing_skill.count("destructive_hint: true") == 5
+    assert "play_range" not in processing_skill
+
 
 def test_release_sources_are_synchronized_by_release_please():
     root = Path(__file__).parents[1]
@@ -62,6 +72,8 @@ def test_release_sources_are_synchronized_by_release_please():
         "src/dcc_mcp_shogun/__version__.py",
         "src/dcc_mcp_shogun/skills/shogun-scene/SKILL.md",
         "src/dcc_mcp_shogun/skills/shogun-files/SKILL.md",
+        "src/dcc_mcp_shogun/skills/shogun-timeline/SKILL.md",
+        "src/dcc_mcp_shogun/skills/shogun-processing/SKILL.md",
     ):
         assert path in config
 
