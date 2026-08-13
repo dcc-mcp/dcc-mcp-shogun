@@ -339,8 +339,8 @@ class FakeSceneObject:
 
 
 class FakeClip(FakeSceneObject):
-    def __init__(self):
-        super().__init__("BodyClip", "/BodyClip", "Clip")
+    def __init__(self, name="BodyClip"):
+        super().__init__(name, "/{}".format(name), "Clip")
         self.Locked = True
         self.Start_Frame = 10.0
         self.Clip_Offset = 2.0
@@ -390,6 +390,7 @@ class FakeScene:
         self.marker = FakeSceneObject("LFHD", "/Actor/LFHD", "Marker", self.root)
         self.root._children = [self.marker]
         self.Objects = FakeObjectList([self.root, self.marker])
+        self.ActiveClip = ""
         self.selected = [self.root]
         self.calls = []
 
@@ -736,6 +737,110 @@ def test_clip_timing_inventory_is_bounded_and_typed(monkeypatch):
         runtime.get_clip_timing("/Performer")
 
 
+def test_active_clip_is_bounded_and_read_back(monkeypatch):
+    scene = FakeScene()
+    scene.Objects = FakeObjectList([FakeClip(), FakeClip("ReviewClip")])
+    scene.ActiveClip = "BodyClip"
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+
+    assert runtime.get_active_clip() == {
+        "active_clip": "BodyClip",
+        "has_active_clip": True,
+    }
+    assert runtime.set_active_clip("ReviewClip") == {
+        "previous_active_clip": "BodyClip",
+        "active_clip": "ReviewClip",
+    }
+    assert scene.ActiveClip == "ReviewClip"
+
+    with pytest.raises(ValueError, match="was not found"):
+        runtime.set_active_clip("MissingClip")
+
+
+def test_active_clip_restores_previous_value_after_readback_mismatch(monkeypatch):
+    class MismatchingScene(FakeScene):
+        def __init__(self):
+            self._active_clip = ""
+            super().__init__()
+
+        @property
+        def ActiveClip(self):
+            return self._active_clip
+
+        @ActiveClip.setter
+        def ActiveClip(self, value):
+            self._active_clip = "UnexpectedClip" if value == "ReviewClip" else value
+
+    scene = MismatchingScene()
+    scene.Objects = FakeObjectList([FakeClip(), FakeClip("ReviewClip")])
+    scene.ActiveClip = "BodyClip"
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+
+    with pytest.raises(RuntimeError, match="did not activate"):
+        runtime.set_active_clip("ReviewClip")
+    assert scene.ActiveClip == "BodyClip"
+
+
+def test_clip_timing_update_is_allowlisted_and_transactional(monkeypatch):
+    clip = FakeClip()
+    scene = FakeScene()
+    scene.Objects = FakeObjectList([clip])
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+
+    result = runtime.update_clip_timing(
+        "/BodyClip",
+        locked=False,
+        start_frame=20.0,
+        duration=60.0,
+        time_scale=0.5,
+        smpte_align_clip=False,
+    )
+    assert result["previous"]["start_frame"] == 10.0
+    assert result["current"] == {
+        "locked": False,
+        "start_frame": 20.0,
+        "clip_offset": 2.0,
+        "duration": 60.0,
+        "time_scale": 0.5,
+        "smpte_align_clip": False,
+    }
+    assert clip.Time_Scale == 0.5
+
+    with pytest.raises(ValueError, match="at least one"):
+        runtime.update_clip_timing("/BodyClip")
+    with pytest.raises(ValueError, match="duration"):
+        runtime.update_clip_timing("/BodyClip", duration=-1.0)
+    with pytest.raises(ValueError, match="time_scale"):
+        runtime.update_clip_timing("/BodyClip", time_scale=0.0)
+
+
+def test_clip_timing_update_restores_prior_values_after_vendor_failure(monkeypatch):
+    class FailingClip(FakeClip):
+        def __init__(self):
+            self._time_scale = 1.0
+            super().__init__()
+
+        @property
+        def Time_Scale(self):
+            return self._time_scale
+
+        @Time_Scale.setter
+        def Time_Scale(self, value):
+            if value == 0.5:
+                raise RuntimeError("vendor failure")
+            self._time_scale = value
+
+    clip = FailingClip()
+    scene = FakeScene()
+    scene.Objects = FakeObjectList([clip])
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+
+    with pytest.raises(RuntimeError, match="vendor failure"):
+        runtime.update_clip_timing("/BodyClip", start_frame=20.0, time_scale=0.5)
+    assert clip.Start_Frame == 10.0
+    assert clip.Time_Scale == 1.0
+
+
 def test_character_status_excludes_private_free_text(monkeypatch):
     scene = FakeScene()
     scene.Objects = FakeObjectList([FakeCharacter()])
@@ -770,6 +875,67 @@ def test_character_status_excludes_private_free_text(monkeypatch):
     scene.Objects = FakeObjectList([FakeClip()])
     with pytest.raises(ValueError, match="not a Character"):
         runtime.get_character_status("/BodyClip")
+
+
+def test_character_qa_update_excludes_private_fields_and_rolls_back(monkeypatch):
+    character = FakeCharacter()
+    scene = FakeScene()
+    scene.Objects = FakeObjectList([character])
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+
+    result = runtime.update_character_qa_status(
+        "/Performer",
+        shot_approved=True,
+        shot_attached=True,
+        special_flag=True,
+    )
+    assert result["previous"]["shot_approved"] is False
+    assert result["current"] == {
+        "active": True,
+        "shot_labeled": True,
+        "shot_edited": True,
+        "shot_approved": True,
+        "shot_attached": True,
+        "special_flag": True,
+    }
+    assert "private-user" not in repr(result)
+    assert "private production note" not in repr(result)
+
+    with pytest.raises(ValueError, match="at least one"):
+        runtime.update_character_qa_status("/Performer")
+    with pytest.raises(ValueError, match="true or false"):
+        runtime.update_character_qa_status("/Performer", shot_approved="yes")
+
+
+def test_character_qa_update_restores_prior_values_after_vendor_failure(monkeypatch):
+    class FailingCharacter(FakeCharacter):
+        def __init__(self):
+            self._shot_attached = False
+            super().__init__()
+
+        @property
+        def Shot_Attached(self):
+            return self._shot_attached
+
+        @Shot_Attached.setter
+        def Shot_Attached(self, value):
+            if value is True:
+                raise RuntimeError("vendor failure")
+            self._shot_attached = value
+
+    character = FailingCharacter()
+    scene = FakeScene()
+    scene.Objects = FakeObjectList([character])
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+
+    with pytest.raises(RuntimeError, match="vendor failure"):
+        runtime.update_character_qa_status(
+            "/Performer",
+            shot_approved=True,
+            shot_attached=True,
+        )
+    assert character.Shot_Approved is False
+    assert character.Shot_Attached is False
 
 
 def test_scene_object_reads_are_bounded_and_typed(monkeypatch):

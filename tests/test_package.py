@@ -82,8 +82,17 @@ def test_skills_keep_read_and_mutation_boundaries_explicit():
     production_skill = (root / "shogun-production-context" / "tools.yaml").read_text(
         encoding="utf-8"
     )
-    assert production_skill.count("  - name:") == 4
-    assert production_skill.count("read_only_hint: true") == 4
+    assert production_skill.count("  - name:") == 8
+    assert production_skill.count("read_only_hint: true") == 5
+    assert production_skill.count("destructive_hint: true") == 2
+    assert production_skill.count("additionalProperties: false") == 8
+    for tool_name in (
+        "get_active_clip",
+        "set_active_clip",
+        "update_clip_timing",
+        "update_character_qa_status",
+    ):
+        assert "  - name: {}".format(tool_name) in production_skill
     for private_field in ("Edit_Artist", "Review_Artist", "Production_Notes", "Trial_Notes"):
         assert private_field not in production_skill
 
@@ -117,6 +126,17 @@ def test_showcase_assets_are_present_and_bounded():
     motion = root / "examples" / "showcase" / "assets" / "dcc-mcp-shogun-showcase.bvh"
     assert image.is_file() and image.stat().st_size < 500 * 1024
     assert motion.is_file() and motion.stat().st_size < 500 * 1024
+
+
+def test_official_sdk_coverage_tracks_production_context_contracts():
+    root = Path(__file__).parents[1]
+    coverage = (root / "docs" / "official-sdk-coverage.md").read_text(encoding="utf-8")
+    readme = (root / "README.md").read_text(encoding="utf-8")
+
+    assert "Total: 61 typed tools" in coverage
+    for contract in ("set_active_clip", "update_clip_timing", "update_character_qa_status"):
+        assert contract in coverage
+    assert "read-back verification and rollback" in readme
 
 
 def test_shogun_119_file_operation_boundary_is_disclosed():

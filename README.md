@@ -34,9 +34,12 @@ on a general-purpose Python interpreter embedded in the Shogun Post UI.
 - inspect and explicitly change current frame, selected time ranges,
   range selection derived from keys, play/animation ranges, and playback through
   the capability-gated `Timeline` interface;
-- inspect bounded Clip timing, offsets, time scale, lock and SMPTE alignment,
-  plus Character frame bounds and shot-QA flags, while excluding artist
-  identities and free-form notes;
+- inspect bounded Clip timing, offsets, time scale, lock and SMPTE alignment;
+  read or explicitly change the active Clip; and update an allowlisted Clip
+  timing subset with vendor read-back verification and rollback;
+- inspect Character frame bounds and shot-QA flags, and update only six
+  allowlisted Boolean workflow fields with vendor read-back verification and
+  rollback, while excluding artist identities and free-form notes;
 - repair one explicit marker sample with read-back verification; select channel
   keys from the current ranges, delete one explicit key or selected keys, and
   apply bounded FIR or weighted-average filtering that defaults to selected keys;
@@ -48,7 +51,11 @@ on a general-purpose Python interpreter embedded in the Shogun Post UI.
   the official SDK;
 - register one Shogun Post GUI instance with the DCC-MCP local gateway.
 
-The mutating surface is deliberately narrow. Cleanup never exposes the SDK's
+The mutating surface is deliberately narrow. Clip mutation cannot create,
+remove, rename, or reparent NLE objects, and Character mutation cannot read or
+write artist identities or free-form notes. Both mutation paths validate every
+field before connecting, verify the vendor read-back, and attempt rollback on
+partial failure. Cleanup never exposes the SDK's
 unbounded `DeleteAllKeys` operation. Single-sample writes are finite and bounded,
 return the previous value, and fail if Shogun does not return the requested
 sample. Processing requires an explicit
@@ -84,12 +91,18 @@ Trajectory write and filter effects on a non-empty disposable take are not yet
 claimed as live-validated. A host-build or scene-state rejection never falls
 back to arbitrary script execution.
 
-`shogun-production-context` exposes four read-only Clip and Character tools.
-They were loaded and dispatched through a live 1.19 host; the blank scene
-returned bounded `ControlError` responses and the host remained available.
-The official Database interface is intentionally not public: an isolated read
-probe coincided with host termination, so it remains deferred until that
-stability signal can be reproduced and resolved.
+`shogun-production-context` exposes eight Clip and Character tools. Its four
+read-only tools were loaded and dispatched through a live 1.19 host; the blank
+scene returned bounded `ControlError` responses and the host remained
+available. All eight current tools were then loaded from the packaged Skill in
+a live 1.19 adapter; `get_active_clip` reached the official Scene interface and
+returned the same bounded `ControlError` on the blank scene without affecting
+host availability. The active-Clip, Clip-timing, and Character-QA mutation
+contracts are SDK-mapped, schema-tested, read-back verified, rollback-aware,
+and remain capability-gated until a disposable non-empty scene is available
+for live mutation evidence. The official Database interface is intentionally
+not public: an isolated read probe coincided with host termination, so it
+remains deferred until that stability signal can be reproduced and resolved.
 
 The implemented contracts follow Vicon's official
 [Shogun Post documentation](https://vicon-help.atlassian.net/wiki/spaces/ShogunPost118/overview),

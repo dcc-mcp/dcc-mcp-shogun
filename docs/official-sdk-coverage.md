@@ -20,9 +20,9 @@ Sources:
 | `shogun-processing` | 12 | `Offline` and allowlisted settings | Explicit current-frame or selected-range processing |
 | `shogun-files` | 3 | `ImportFile`, `SaveFile`, `ExportFile` | Extension/size/overwrite-gated file exchange |
 | `shogun-editing` | 5 | trajectory setters, `Channel`, `FIRFilter`, `WeightedAverageFilter` | One verified sample or one explicit channel; filters default to selected keys |
-| `shogun-production-context` | 4 | `Scene`, `Clip`, `Character` | Read-only bounded timing and QA state; artist identities and notes excluded |
+| `shogun-production-context` | 8 | `Scene.ActiveClip`, `Clip`, `Character` | Bounded timing and QA state plus verified allowlisted updates; identities and notes excluded |
 
-Total: 57 typed tools across six progressively loaded Skills.
+Total: 61 typed tools across six progressively loaded Skills.
 
 The five editing tools have been loaded and dispatched through a live Shogun
 Post 1.19 instance. An empty-scene probe verified fail-closed behavior without
@@ -46,15 +46,27 @@ contract mirrors that workflow while reducing mutation scope:
 - Both filters default to `selected_keys_only=true`; applying to a whole channel
   requires an explicit false value.
 
+## Production-context decisions
+
+- `set_active_clip` accepts one exact existing Clip name, verifies the official
+  `Scene.ActiveClip` read-back, and restores the previous value on mismatch.
+- `update_clip_timing` exposes only lock, start, offset, duration, positive time
+  scale, and SMPTE alignment. Object creation, deletion, renaming, and generic
+  attribute writes remain absent.
+- `update_character_qa_status` exposes six Boolean workflow fields only. Artist
+  identities, user/final names, priority, facing direction, and every free-form
+  note remain unread and unwritable through this mutation path.
+- All allowlisted updates validate every input before connecting, verify the
+  resulting SDK values, and attempt reverse-order rollback on partial failure.
+
 ## Prioritized next families
 
 | Priority | Official SDK family | Planned public boundary |
 |---:|---|---|
-| 1 | `Database` | Deferred: an isolated 1.19 read probe coincided with host termination; require reproducible stability evidence before any public tool |
-| 2 | Clip mutation | Allowlisted active-clip or timing updates only after non-empty recovery-copy validation and rollback proof |
-| 3 | Character mutation | Narrow QA flags only after recovery-copy validation; continue excluding identities and free-form notes |
-| 4 | labeling/solving setup objects | Typed constraint and parameter recipes for retarget setup, with narrow object types and recovery copies |
-| 5 | optical/video camera properties | Post-safe presentation fields; continue excluding device identifiers and capture-security configuration |
+| 1 | labeling/solving setup objects | Typed constraint and parameter recipes for retarget setup, with narrow object types and recovery copies |
+| 2 | optical/video camera properties | Post-safe presentation fields; continue excluding device identifiers and capture-security configuration |
+| 3 | rigid-body inspection | Bounded read-only object, marker, and solve-state summaries before any workflow-specific mutation |
+| Deferred | `Database` | An isolated 1.19 read probe coincided with host termination; require reproducible stability evidence before any public tool |
 
 ## Intentionally not exposed
 
