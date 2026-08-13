@@ -29,8 +29,10 @@ on a general-purpose Python interpreter embedded in the Shogun Post UI.
 - query one marker trajectory value or an inclusive window of at most 2,000
   frames;
 - inspect the capability-gated Scene object graph, hierarchy, transforms,
-  attribute/channel names, bounded channel samples and gaps, optical-camera
-  calibration summaries, selection, visibility, selectability, and opacity;
+  attribute/channel names, bounded channel samples and gaps, expression-safe
+  labeling/solving setup parameters, rigid-body transforms and attached markers,
+  optical/video-camera calibration and presentation summaries, selection,
+  visibility, selectability, and opacity;
 - inspect and explicitly change current frame, selected time ranges,
   range selection derived from keys, play/animation ranges, and playback through
   the capability-gated `Timeline` interface;
@@ -64,17 +66,27 @@ available implicit default. The adapter does not expose scene replacement,
 arbitrary HSL/Python execution, or bulk raw trajectory writes. Existing outputs
 fail closed unless `overwrite=true`, and public results omit full file-system
 paths. The Scene surface does not expose object creation, removal, reparenting,
-or raw attribute writes. Attribute values and camera device identifiers are
-intentionally omitted from inspection results.
+setup-parameter creation/expression edits, or raw attribute writes. Attribute
+values, setup expression source, camera device identifiers, firmware, and
+capture/video file paths are intentionally omitted from inspection results.
 
 The subject, marker, skeleton, constraint, parameter, and trajectory queries in
 `shogun-scene` are live-validated against Shogun Post 1.19. The newer official
-`Scene` object model remains capability-gated because that host can ship the SDK
-surface while rejecting its commands. The same host rejected the SDK's
-`ImportFile` call with `ControlError`, without partially changing the scene. The
-separate `shogun-files` Skill therefore remains explicitly host-build and
-license-capability gated: its tools are typed and fail closed, but
-import/save/export are not claimed as live-supported on 1.19.
+`Scene` object model is also live-validated for scene-object, rigid-body, and
+video-camera inventories in a blank scene. Individual object-detail operations
+remain scene-state gated. The same host rejected the SDK's `ImportFile` call
+with `ControlError`, without partially changing the scene. The separate
+`shogun-files` Skill therefore remains explicitly host-build and
+license-capability gated: its tools are typed and fail closed, but import,
+save, and export are not claimed as live-supported on 1.19.
+
+The setup-parameter, rigid-body, and video-camera extensions use the official
+1.19 object types and are schema- and contract-tested. A wheel-installed adapter
+registered all 27 Scene tools in a live 1.19 host; the three inventory calls
+completed against a blank scene, and missing-object detail probes returned only
+bounded `ControlError` results while the host remained available. Successful
+parameter and detail reads from a disposable non-empty scene are not yet
+claimed.
 
 The same 1.19 host exposes the official `Timeline` and `Offline` Python classes
 but rejects their commands as invalid for that host application. The

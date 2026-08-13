@@ -423,6 +423,48 @@ class FakeCamera(FakeSceneObject):
         self.Residual = 0.15
 
 
+class FakeVideoCamera(FakeCamera):
+    def __init__(self):
+        super().__init__()
+        self.Name = "Vue1"
+        self.Path = "/Cameras/Vue1"
+        self.Type = "VideoCamera"
+        self.Invert = True
+        self.Sub_Sample_Ratio = "2:1"
+        self.Device_ID = "sensitive-device-id"
+        self.Capture_File_Path = "C:/sensitive/capture.mov"
+        self.Video_File = "C:/sensitive/video.mov"
+
+
+class FakeSetupParameter:
+    def __init__(self, name, prior, *, user_value=None, value=None, expression=""):
+        self.Name = name
+        self.Prior = prior
+        if user_value is not None:
+            self.UserValue = user_value
+            self.Expression = expression
+        if value is not None:
+            self.Value = value
+
+
+class FakeSetup(FakeSceneObject):
+    def __init__(self):
+        super().__init__("SolveSetup", "/Actor/SolveSetup", "SolvingSetup")
+        self.StaticParameters = FakeNamedList(
+            [FakeSetupParameter("Scale", 0.5, user_value=1.25, expression="private_rule()")]
+        )
+        self.DynamicParameters = FakeNamedList([FakeSetupParameter("Reach", 0.25, value=2.5)])
+
+
+class FakeRigidBody(FakeSceneObject):
+    def __init__(self):
+        super().__init__("Prop", "/Prop", "RigidBody")
+        marker_a = FakeSceneObject("Prop1", "/Prop/Prop1", "Marker", self)
+        marker_b = FakeSceneObject("Prop2", "/Prop/Prop2", "Marker", self)
+        helper = FakeSceneObject("Helper", "/Prop/Helper", "Node", self)
+        self._children = [marker_a, helper, marker_b]
+
+
 @pytest.fixture
 def client(monkeypatch):
     value = FakeClient()
@@ -964,6 +1006,91 @@ def test_scene_object_reads_are_bounded_and_typed(monkeypatch):
     assert details["parent"] is None
 
 
+def test_setup_parameter_inventory_is_typed_bounded_and_expression_safe(monkeypatch):
+    setup = FakeSetup()
+    scene = FakeScene()
+    scene.Objects = FakeObjectList([setup])
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+
+    result = runtime.list_setup_parameters("/Actor/SolveSetup", max_parameters=1)
+
+    assert result == {
+        "setup": {
+            "name": "SolveSetup",
+            "path": "/Actor/SolveSetup",
+            "type": "SolvingSetup",
+            "showing": True,
+            "selectable": True,
+        },
+        "parameter_kind": "all",
+        "parameters": [
+            {
+                "name": "Scale",
+                "kind": "static",
+                "prior": 0.5,
+                "user_value": 1.25,
+                "has_expression": True,
+            }
+        ],
+        "parameter_count": 2,
+        "truncated": True,
+    }
+    assert "private_rule" not in repr(result)
+    dynamic = runtime.list_setup_parameters(
+        "/Actor/SolveSetup", parameter_kind="dynamic", max_parameters=10
+    )
+    assert dynamic["parameters"] == [
+        {"name": "Reach", "kind": "dynamic", "prior": 0.25, "value": 2.5}
+    ]
+
+
+def test_new_scene_reads_validate_scope_and_exact_object_types(monkeypatch):
+    scene = FakeScene()
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+
+    with pytest.raises(ValueError, match="parameter_kind"):
+        runtime.list_setup_parameters("/Actor", parameter_kind="arbitrary")
+    with pytest.raises(ValueError, match="labeling or solving setup"):
+        runtime.list_setup_parameters("/Actor")
+    with pytest.raises(ValueError, match="rigid body"):
+        runtime.rigid_body_details("/Actor", frame=42)
+    with pytest.raises(ValueError, match="video camera"):
+        runtime.video_camera_details("/Actor")
+
+
+def test_rigid_body_inventory_and_frame_details_are_typed_and_bounded(monkeypatch):
+    rigid_body = FakeRigidBody()
+    scene = FakeScene()
+    scene.Objects = FakeObjectList([scene.root, rigid_body])
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+
+    inventory = runtime.list_rigid_bodies(max_rigid_bodies=1)
+    assert inventory["rigid_bodies"] == [
+        {
+            "name": "Prop",
+            "path": "/Prop",
+            "type": "RigidBody",
+            "showing": True,
+            "selectable": True,
+        }
+    ]
+    details = runtime.rigid_body_details("/Prop", frame=42, max_markers=1)
+    assert details["translation"] == [1.0, 2.0, 3.0]
+    assert details["rotation"] == [10.0, 20.0, 30.0]
+    assert details["scale"] == [1.0, 1.0, 1.0]
+    assert details["markers"] == [
+        {
+            "name": "Prop1",
+            "path": "/Prop/Prop1",
+            "type": "Marker",
+            "showing": True,
+            "selectable": True,
+        }
+    ]
+    assert details["marker_count"] == 2
+    assert details["markers_truncated"] is True
+
+
 def test_object_attributes_channels_samples_and_gaps_are_bounded(monkeypatch):
     scene = FakeScene()
     monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
@@ -999,6 +1126,22 @@ def test_optical_camera_inventory_excludes_device_identifier(monkeypatch):
     assert details["camera_number"] == 1
     assert details["sensor_width"] == 2048
     assert "device" not in repr(details).lower()
+
+
+def test_video_camera_inventory_exposes_only_post_safe_presentation_fields(monkeypatch):
+    camera = FakeVideoCamera()
+    scene = FakeScene()
+    scene.Objects = FakeObjectList([camera])
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+
+    assert runtime.list_video_cameras()["cameras"][0]["name"] == "Vue1"
+    details = runtime.video_camera_details("/Cameras/Vue1")
+    assert details["image_inverted"] is True
+    assert details["sub_sample_ratio"] == "2:1"
+    assert details["sensor_width"] == 2048
+    assert "device" not in repr(details).lower()
+    assert "sensitive" not in repr(details).lower()
+    assert "file" not in repr(details).lower()
 
 
 def test_scene_selection_and_display_updates_are_explicit(monkeypatch):

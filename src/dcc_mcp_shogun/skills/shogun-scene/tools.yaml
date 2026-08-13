@@ -145,6 +145,125 @@ tools:
     next-tools:
       on-failure: [shogun_scene__list_scene_objects, shogun_scene__inspect_scene]
 
+  - name: list_setup_parameters
+    description: List bounded, expression-safe parameters from one labeling or solving setup.
+    source_file: scripts/list_setup_parameters.py
+    input_schema:
+      type: object
+      required: [object_path]
+      properties:
+        object_path: {type: string, minLength: 1, maxLength: 2048}
+        parameter_kind: {type: string, enum: [all, static, dynamic], default: all}
+        max_parameters: {type: integer, minimum: 1, maximum: 10000, default: 500}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 15
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-failure: [shogun_scene__list_scene_objects, shogun_scene__inspect_scene]
+
+  - name: list_rigid_bodies
+    description: List a bounded set of official Vicon rigid-body Scene objects.
+    source_file: scripts/list_rigid_bodies.py
+    input_schema:
+      type: object
+      properties:
+        max_rigid_bodies: {type: integer, minimum: 1, maximum: 10000, default: 500}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 15
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-success: [shogun_scene__get_rigid_body_details]
+      on-failure: [shogun_scene__inspect_scene]
+
+  - name: get_rigid_body_details
+    description: Read one rigid body's transform and attached markers at one explicit frame.
+    source_file: scripts/get_rigid_body_details.py
+    input_schema:
+      type: object
+      required: [object_path, frame]
+      properties:
+        object_path: {type: string, minLength: 1, maxLength: 2048}
+        frame: {type: integer, minimum: 0, maximum: 2147483647}
+        max_markers: {type: integer, minimum: 1, maximum: 10000, default: 100}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 15
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-failure: [shogun_scene__list_rigid_bodies, shogun_scene__inspect_scene]
+
+  - name: list_video_cameras
+    description: List bounded official video-camera objects without device or capture-path metadata.
+    source_file: scripts/list_video_cameras.py
+    input_schema:
+      type: object
+      properties:
+        max_cameras: {type: integer, minimum: 1, maximum: 10000, default: 500}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 15
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-success: [shogun_scene__get_video_camera_details]
+      on-failure: [shogun_scene__inspect_scene]
+
+  - name: get_video_camera_details
+    description: Read safe calibration and presentation fields from one explicit video camera.
+    source_file: scripts/get_video_camera_details.py
+    input_schema:
+      type: object
+      required: [object_path]
+      properties:
+        object_path: {type: string, minLength: 1, maxLength: 2048}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 15
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-failure: [shogun_scene__list_video_cameras, shogun_scene__inspect_scene]
+
   - name: inspect_object_selection
     description: Read the bounded selected-object set and primary Scene object.
     source_file: scripts/inspect_object_selection.py
