@@ -338,6 +338,38 @@ class FakeSceneObject:
         return self._children
 
 
+class FakeClip(FakeSceneObject):
+    def __init__(self):
+        super().__init__("BodyClip", "/BodyClip", "Clip")
+        self.Locked = True
+        self.Start_Frame = 10.0
+        self.Clip_Offset = 2.0
+        self.Duration = 120.0
+        self.Time_Scale = 1.0
+        self.SMPTE_Offset = 1001.0
+        self.SMPTE_Align_Clip = True
+        self.SMPTE_Offset_Time_Shift = 0.25
+        self.SMPTE_Offset_Data_Shift = -0.25
+
+
+class FakeCharacter(FakeSceneObject):
+    def __init__(self):
+        super().__init__("Performer", "/Performer", "Character")
+        self.Active = True
+        self.Frame_In = 10
+        self.Frame_Out = 129
+        self.Shot_Labeled = True
+        self.Shot_Edited = True
+        self.Shot_Approved = False
+        self.Shot_Attached = False
+        self.Prop_Count = 1
+        self.Special_Flag = False
+        self.Facing_Direction = "+Y"
+        self.Priority = "Normal"
+        self.Edit_Artist = "private-user"
+        self.Production_Notes = "private production note"
+
+
 class FakeObjectList:
     def __init__(self, objects):
         self._objects = objects
@@ -671,6 +703,73 @@ def test_weighted_average_filter_maps_official_width_and_strength(monkeypatch):
         runtime.apply_weighted_average_filter("/Actor", "Translation", width=2)
     with pytest.raises(ValueError, match="strength"):
         runtime.apply_weighted_average_filter("/Actor", "Translation", strength=11)
+
+
+def test_clip_timing_inventory_is_bounded_and_typed(monkeypatch):
+    scene = FakeScene()
+    scene.Objects = FakeObjectList([FakeClip()])
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+
+    assert runtime.list_clips(max_clips=10) == {
+        "clips": [
+            {
+                "name": "BodyClip",
+                "path": "/BodyClip",
+                "type": "Clip",
+                "locked": True,
+                "start_frame": 10.0,
+                "clip_offset": 2.0,
+                "duration": 120.0,
+                "time_scale": 1.0,
+                "smpte_offset": 1001.0,
+                "smpte_align_clip": True,
+                "smpte_offset_time_shift": 0.25,
+                "smpte_offset_data_shift": -0.25,
+            }
+        ],
+        "clip_count": 1,
+        "truncated": False,
+    }
+    assert runtime.get_clip_timing("/BodyClip")["duration"] == 120.0
+    scene.Objects = FakeObjectList([FakeCharacter()])
+    with pytest.raises(ValueError, match="not a Clip"):
+        runtime.get_clip_timing("/Performer")
+
+
+def test_character_status_excludes_private_free_text(monkeypatch):
+    scene = FakeScene()
+    scene.Objects = FakeObjectList([FakeCharacter()])
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+
+    result = runtime.list_character_statuses(max_characters=10)
+    assert result == {
+        "characters": [
+            {
+                "name": "Performer",
+                "path": "/Performer",
+                "type": "Character",
+                "active": True,
+                "frame_in": 10,
+                "frame_out": 129,
+                "shot_labeled": True,
+                "shot_edited": True,
+                "shot_approved": False,
+                "shot_attached": False,
+                "prop_count": 1,
+                "special_flag": False,
+                "facing_direction": "+Y",
+                "priority": "Normal",
+            }
+        ],
+        "character_count": 1,
+        "truncated": False,
+    }
+    assert "private-user" not in repr(result)
+    assert "private production note" not in repr(result)
+    assert runtime.get_character_status("/Performer")["shot_approved"] is False
+    scene.Objects = FakeObjectList([FakeClip()])
+    with pytest.raises(ValueError, match="not a Character"):
+        runtime.get_character_status("/BodyClip")
 
 
 def test_scene_object_reads_are_bounded_and_typed(monkeypatch):

@@ -20,8 +20,9 @@ Sources:
 | `shogun-processing` | 12 | `Offline` and allowlisted settings | Explicit current-frame or selected-range processing |
 | `shogun-files` | 3 | `ImportFile`, `SaveFile`, `ExportFile` | Extension/size/overwrite-gated file exchange |
 | `shogun-editing` | 5 | trajectory setters, `Channel`, `FIRFilter`, `WeightedAverageFilter` | One verified sample or one explicit channel; filters default to selected keys |
+| `shogun-production-context` | 4 | `Scene`, `Clip`, `Character` | Read-only bounded timing and QA state; artist identities and notes excluded |
 
-Total: 53 typed tools across five progressively loaded Skills.
+Total: 57 typed tools across six progressively loaded Skills.
 
 The five editing tools have been loaded and dispatched through a live Shogun
 Post 1.19 instance. An empty-scene probe verified fail-closed behavior without
@@ -49,9 +50,9 @@ contract mirrors that workflow while reducing mutation scope:
 
 | Priority | Official SDK family | Planned public boundary |
 |---:|---|---|
-| 1 | `Database` | Read current project/capture-day/session and bounded marked-take summaries before any create/set tools |
-| 2 | `Clip` and active-clip state | Inspect NLE timing first; allowlisted timing updates with rollback later |
-| 3 | `Character` | Status and frame-range fields only; exclude free-form artist/production notes by default |
+| 1 | `Database` | Deferred: an isolated 1.19 read probe coincided with host termination; require reproducible stability evidence before any public tool |
+| 2 | Clip mutation | Allowlisted active-clip or timing updates only after non-empty recovery-copy validation and rollback proof |
+| 3 | Character mutation | Narrow QA flags only after recovery-copy validation; continue excluding identities and free-form notes |
 | 4 | labeling/solving setup objects | Typed constraint and parameter recipes for retarget setup, with narrow object types and recovery copies |
 | 5 | optical/video camera properties | Post-safe presentation fields; continue excluding device identifiers and capture-security configuration |
 
@@ -63,3 +64,4 @@ contract mirrors that workflow while reducing mutation scope:
 - scene-object creation/removal/reparenting without a workflow-specific typed
   contract;
 - paths, device identifiers, or free-form production notes in public results.
+- Eclipse database access until the 1.19 host-stability signal is understood.

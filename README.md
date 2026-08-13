@@ -34,6 +34,9 @@ on a general-purpose Python interpreter embedded in the Shogun Post UI.
 - inspect and explicitly change current frame, selected time ranges,
   range selection derived from keys, play/animation ranges, and playback through
   the capability-gated `Timeline` interface;
+- inspect bounded Clip timing, offsets, time scale, lock and SMPTE alignment,
+  plus Character frame bounds and shot-QA flags, while excluding artist
+  identities and free-form notes;
 - repair one explicit marker sample with read-back verification; select channel
   keys from the current ranges, delete one explicit key or selected keys, and
   apply bounded FIR or weighted-average filtering that defaults to selected keys;
@@ -80,6 +83,13 @@ safely rejected as a bounded `ControlError`, with the scene remaining empty.
 Trajectory write and filter effects on a non-empty disposable take are not yet
 claimed as live-validated. A host-build or scene-state rejection never falls
 back to arbitrary script execution.
+
+`shogun-production-context` exposes four read-only Clip and Character tools.
+They were loaded and dispatched through a live 1.19 host; the blank scene
+returned bounded `ControlError` responses and the host remained available.
+The official Database interface is intentionally not public: an isolated read
+probe coincided with host termination, so it remains deferred until that
+stability signal can be reproduced and resolved.
 
 The implemented contracts follow Vicon's official
 [Shogun Post documentation](https://vicon-help.atlassian.net/wiki/spaces/ShogunPost118/overview),
