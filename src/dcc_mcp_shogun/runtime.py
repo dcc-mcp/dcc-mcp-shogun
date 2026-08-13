@@ -695,6 +695,118 @@ def apply_weighted_average_filter(
     }
 
 
+def _bounded_sdk_text(value: Any, *, maximum: int = 512) -> str:
+    text = str(value).replace("\x00", "").replace("\r", " ").replace("\n", " ").strip()
+    return text[:maximum]
+
+
+def _clip_summary(value: Any) -> Dict[str, Any]:
+    return {
+        "name": _bounded_sdk_text(value.Name),
+        "path": _bounded_sdk_text(value.Path, maximum=2048),
+        "type": _bounded_sdk_text(value.Type, maximum=128),
+        "locked": bool(value.Locked),
+        "start_frame": _bounded_float(
+            value.Start_Frame,
+            label="start_frame",
+            minimum=-1_000_000_000.0,
+            maximum=1_000_000_000.0,
+        ),
+        "clip_offset": _bounded_float(
+            value.Clip_Offset,
+            label="clip_offset",
+            minimum=-1_000_000_000.0,
+            maximum=1_000_000_000.0,
+        ),
+        "duration": _bounded_float(
+            value.Duration, label="duration", minimum=0.0, maximum=1_000_000_000.0
+        ),
+        "time_scale": _bounded_float(
+            value.Time_Scale, label="time_scale", minimum=-1_000_000.0, maximum=1_000_000.0
+        ),
+        "smpte_offset": _bounded_float(
+            value.SMPTE_Offset,
+            label="smpte_offset",
+            minimum=-1_000_000_000.0,
+            maximum=1_000_000_000.0,
+        ),
+        "smpte_align_clip": bool(value.SMPTE_Align_Clip),
+        "smpte_offset_time_shift": _bounded_float(
+            value.SMPTE_Offset_Time_Shift,
+            label="smpte_offset_time_shift",
+            minimum=-1_000_000_000.0,
+            maximum=1_000_000_000.0,
+        ),
+        "smpte_offset_data_shift": _bounded_float(
+            value.SMPTE_Offset_Data_Shift,
+            label="smpte_offset_data_shift",
+            minimum=-1_000_000_000.0,
+            maximum=1_000_000_000.0,
+        ),
+    }
+
+
+def list_clips(max_clips: int = 500) -> Dict[str, Any]:
+    """List bounded clip timing state without changing active clip or NLE data."""
+    _bounded_limit(max_clips, label="max_clips", maximum=10000)
+    values = list(official_interface("Scene").Objects.FilterByType("Clip"))
+    return {
+        "clips": [_clip_summary(value) for value in values[:max_clips]],
+        "clip_count": len(values),
+        "truncated": len(values) > max_clips,
+    }
+
+
+def get_clip_timing(object_path: str) -> Dict[str, Any]:
+    """Read one explicit Clip object without changing active clip or NLE data."""
+    value = _scene_object(official_interface("Scene"), object_path)
+    if str(value.Type) != "Clip":
+        raise ValueError("scene object is not a Clip")
+    return _clip_summary(value)
+
+
+def _character_status(value: Any) -> Dict[str, Any]:
+    return {
+        "name": _bounded_sdk_text(value.Name),
+        "path": _bounded_sdk_text(value.Path, maximum=2048),
+        "type": _bounded_sdk_text(value.Type, maximum=128),
+        "active": bool(value.Active),
+        "frame_in": _bounded_int(
+            value.Frame_In, label="frame_in", minimum=-MAX_FRAME, maximum=MAX_FRAME
+        ),
+        "frame_out": _bounded_int(
+            value.Frame_Out, label="frame_out", minimum=-MAX_FRAME, maximum=MAX_FRAME
+        ),
+        "shot_labeled": bool(value.Shot_Labeled),
+        "shot_edited": bool(value.Shot_Edited),
+        "shot_approved": bool(value.Shot_Approved),
+        "shot_attached": bool(value.Shot_Attached),
+        "prop_count": _bounded_int(value.Prop_Count, label="prop_count", minimum=0, maximum=10000),
+        "special_flag": bool(value.Special_Flag),
+        "facing_direction": _bounded_sdk_text(value.Facing_Direction, maximum=128),
+        "priority": _bounded_sdk_text(value.Priority, maximum=128),
+    }
+
+
+def list_character_statuses(max_characters: int = 500) -> Dict[str, Any]:
+    """List bounded character QA status while excluding artists and free-form notes."""
+    _bounded_limit(max_characters, label="max_characters", maximum=10000)
+    values = list(official_interface("Scene").Objects.FilterByType("Character"))
+    return {
+        "characters": [_character_status(value) for value in values[:max_characters]],
+        "character_count": len(values),
+        "truncated": len(values) > max_characters,
+    }
+
+
+def get_character_status(object_path: str) -> Dict[str, Any]:
+    """Read one Character's bounded QA state without artists or free-form notes."""
+    value = _scene_object(official_interface("Scene"), object_path)
+    if str(value.Type) != "Character":
+        raise ValueError("scene object is not a Character")
+    return _character_status(value)
+
+
 def list_optical_cameras(max_cameras: int = 500) -> Dict[str, Any]:
     """List optical cameras through the vendor Scene type filter."""
     _bounded_limit(max_cameras, label="max_cameras", maximum=10000)

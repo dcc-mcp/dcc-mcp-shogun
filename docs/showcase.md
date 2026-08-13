@@ -16,7 +16,9 @@ studio capture data, installation paths, machine names, or credentials.
    their typed Skills without running UI fallback.
 8. On a disposable recovery copy, probe the official channel-key and filtering
    contracts through `shogun-editing`, then re-inspect the affected sample.
-9. Continue to save/export only when the selected host build accepts the import;
+9. Inspect bounded Clip timing and Character QA state through the read-only
+   `shogun-production-context` Skill.
+10. Continue to save/export only when the selected host build accepts the import;
    otherwise retain the fail-closed result as compatibility evidence.
 
 ## Reproduce
@@ -33,6 +35,8 @@ dcc-mcp-cli load-skill shogun-processing --dcc-type shogun --instance-id <instan
 dcc-mcp-cli call <instance>.shogun_processing__inspect_processing_settings --json '{"section":"reconstruct"}' --wait
 dcc-mcp-cli load-skill shogun-editing --dcc-type shogun --instance-id <instance>
 dcc-mcp-cli call <instance>.shogun_editing__select_channel_keys --json-file select-keys.json --wait
+dcc-mcp-cli load-skill shogun-production-context --dcc-type shogun --instance-id <instance>
+dcc-mcp-cli call <instance>.shogun_production_context__list_clips --json '{"max_clips":100}' --wait
 dcc-mcp-cli load-skill shogun-files --dcc-type shogun --instance-id <instance>
 dcc-mcp-cli call <instance>.shogun_files__import_motion --json-file import.json --wait
 ```
@@ -63,6 +67,10 @@ not included.
   each returned the same bounded `ControlError`, and a typed re-inspection
   confirmed zero frames and zero subjects. Filter effects on a non-empty
   disposable take remain a separate acceptance requirement;
+- a separate live 1.19 blank-scene probe loaded all four Clip/Character tools;
+  the list calls returned bounded `ControlError` responses and the host remained
+  available. The Database interface is omitted after an isolated read probe
+  coincided with host termination;
 - returned scene paths are reduced to file names;
 - vendor exceptions are reduced to exception class names without tracebacks;
 - unit tests, skill validation, package build, metadata check, and CI all pass.

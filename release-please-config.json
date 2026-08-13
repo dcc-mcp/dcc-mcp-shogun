@@ -12,7 +12,8 @@
         {"type": "generic", "path": "src/dcc_mcp_shogun/skills/shogun-files/SKILL.md"},
         {"type": "generic", "path": "src/dcc_mcp_shogun/skills/shogun-timeline/SKILL.md"},
         {"type": "generic", "path": "src/dcc_mcp_shogun/skills/shogun-processing/SKILL.md"},
-        {"type": "generic", "path": "src/dcc_mcp_shogun/skills/shogun-editing/SKILL.md"}
+        {"type": "generic", "path": "src/dcc_mcp_shogun/skills/shogun-editing/SKILL.md"},
+        {"type": "generic", "path": "src/dcc_mcp_shogun/skills/shogun-production-context/SKILL.md"}
       ]
     }
   }

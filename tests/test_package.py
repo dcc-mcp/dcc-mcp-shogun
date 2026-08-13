@@ -26,6 +26,7 @@ def test_bundled_skills_exist():
         "shogun-timeline",
         "shogun-processing",
         "shogun-editing",
+        "shogun-production-context",
     ):
         assert (root / name / "SKILL.md").is_file()
         assert (root / name / "tools.yaml").is_file()
@@ -78,6 +79,14 @@ def test_skills_keep_read_and_mutation_boundaries_explicit():
     assert editing_skill.count("destructive_hint: true") == 4
     assert "delete_all" not in editing_skill
 
+    production_skill = (root / "shogun-production-context" / "tools.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert production_skill.count("  - name:") == 4
+    assert production_skill.count("read_only_hint: true") == 4
+    for private_field in ("Edit_Artist", "Review_Artist", "Production_Notes", "Trial_Notes"):
+        assert private_field not in production_skill
+
 
 def test_release_sources_are_synchronized_by_release_please():
     root = Path(__file__).parents[1]
@@ -90,6 +99,7 @@ def test_release_sources_are_synchronized_by_release_please():
         "src/dcc_mcp_shogun/skills/shogun-timeline/SKILL.md",
         "src/dcc_mcp_shogun/skills/shogun-processing/SKILL.md",
         "src/dcc_mcp_shogun/skills/shogun-editing/SKILL.md",
+        "src/dcc_mcp_shogun/skills/shogun-production-context/SKILL.md",
     ):
         assert path in config
 
