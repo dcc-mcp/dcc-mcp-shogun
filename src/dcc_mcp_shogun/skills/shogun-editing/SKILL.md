@@ -12,7 +12,7 @@ metadata:
     dcc: shogun
     layer: domain
     compatibility: "Python 3.9+; capability-gated Vicon Shogun Post 1.19 SDK"
-    version: "0.5.0" # x-release-please-version
+    version: "0.6.0" # x-release-please-version
     tags: [motion-capture, animation, vicon, cleanup, destructive]
     search-hint: >-
       Vicon Shogun Post Graph Marker Editing cleanup trajectory sample channel
