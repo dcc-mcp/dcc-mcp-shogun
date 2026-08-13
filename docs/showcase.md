@@ -57,10 +57,13 @@ not included.
 - import, save, and export implementations use only the official SDK and return
   path-redacted result metadata, but are not presented as live-supported on
   that host build;
-- a wheel-installed adapter registers all 27 `shogun-scene` tools; the blank
-  1.19 host completes scene-object, rigid-body, and video-camera inventories,
-  while missing-object detail probes return bounded `ControlError` results and
-  leave the exact host available;
+- wheel-installed and public-PyPI adapters register all 27 `shogun-scene`
+  tools. An initialized 100-frame blank session completes scene-object,
+  rigid-body, and video-camera inventories. A separate zero-frame placeholder
+  rejects those official commands with bounded `ControlError` results; a
+  follow-up typed inspection still completes and leaves the exact host
+  available. The adapter never represents the unavailable inventory as an
+  empty list;
 - Shogun Post 1.19 rejects the official `Timeline` and `Offline` interface
   commands as invalid for that host application; typed calls return bounded
   errors, so support is not overclaimed and no processing mutation is attempted;

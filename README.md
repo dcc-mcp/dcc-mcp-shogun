@@ -72,21 +72,25 @@ capture/video file paths are intentionally omitted from inspection results.
 
 The subject, marker, skeleton, constraint, parameter, and trajectory queries in
 `shogun-scene` are live-validated against Shogun Post 1.19. The newer official
-`Scene` object model is also live-validated for scene-object, rigid-body, and
-video-camera inventories in a blank scene. Individual object-detail operations
-remain scene-state gated. The same host rejected the SDK's `ImportFile` call
+`Scene` object model is live-validated for scene-object, rigid-body, and
+video-camera inventories in an initialized 100-frame blank session. A fresh
+zero-frame placeholder session rejects those same official object-list commands
+with `ControlError`; the adapter reports that host-state boundary instead of
+claiming an empty inventory. Individual object-detail operations remain
+scene-state gated. A live 1.19 host also rejected the SDK's `ImportFile` call
 with `ControlError`, without partially changing the scene. The separate
 `shogun-files` Skill therefore remains explicitly host-build and
 license-capability gated: its tools are typed and fail closed, but import,
 save, and export are not claimed as live-supported on 1.19.
 
 The setup-parameter, rigid-body, and video-camera extensions use the official
-1.19 object types and are schema- and contract-tested. A wheel-installed adapter
-registered all 27 Scene tools in a live 1.19 host; the three inventory calls
-completed against a blank scene, and missing-object detail probes returned only
-bounded `ControlError` results while the host remained available. Successful
-parameter and detail reads from a disposable non-empty scene are not yet
-claimed.
+1.19 object types and are schema- and contract-tested. Wheel-installed and
+public-PyPI adapters both registered all 27 Scene tools in live 1.19 hosts. The
+three inventory calls completed in the initialized blank session; in a separate
+zero-frame placeholder they returned only bounded `ControlError` results, and
+follow-up typed inspection confirmed that the exact host remained available.
+Successful parameter and detail reads from a disposable non-empty scene are not
+yet claimed.
 
 The same 1.19 host exposes the official `Timeline` and `Offline` Python classes
 but rejects their commands as invalid for that host application. The
