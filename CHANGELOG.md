@@ -11,6 +11,13 @@
 - Add ROM labeling, subject calibration, QuickPost, and expanded processing
   settings from the official `Offline` interface.
 
+## [0.8.0](https://github.com/dcc-mcp/dcc-mcp-shogun/compare/v0.7.0...v0.8.0) (2026-08-13)
+
+
+### Features
+
+* **scene:** add setup, rigid-body, and video-camera reads ([#14](https://github.com/dcc-mcp/dcc-mcp-shogun/issues/14)) ([d376efe](https://github.com/dcc-mcp/dcc-mcp-shogun/commit/d376efee7a61f90643eb1aa5983329c430b226d6))
+
 ## [0.7.0](https://github.com/dcc-mcp/dcc-mcp-shogun/compare/v0.6.0...v0.7.0) (2026-08-13)
 
 
