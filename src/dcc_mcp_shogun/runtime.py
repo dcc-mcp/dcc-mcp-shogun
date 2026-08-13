@@ -6,7 +6,7 @@ import math
 from pathlib import Path
 from typing import Any, Dict, List, Union
 
-from .sdk import connect_client, official_interface
+from .sdk import connect_client, official_interface, official_type
 
 MAX_TRAJECTORY_WINDOW = 2000
 MAX_CHANNEL_GAPS = 2000
@@ -80,6 +80,15 @@ def _scene_object(scene: Any, object_path: str) -> Any:
     if value is None:
         raise ValueError("scene object was not found")
     return value
+
+
+def _object_channel(scene: Any, object_path: str, channel_name: str) -> tuple[Any, str, Any]:
+    value = _scene_object(scene, object_path)
+    name = _bounded_text(channel_name, label="channel_name", maximum=256)
+    channel = value.Channels[name]
+    if channel is None:
+        raise ValueError("channel was not found")
+    return value, name, channel
 
 
 def _object_summary(value: Any) -> Dict[str, Any]:
@@ -383,6 +392,73 @@ def trajectory_window(
     }
 
 
+def set_trajectory_sample(
+    subject: str,
+    marker: str,
+    frame: int,
+    *,
+    x: Any,
+    y: Any,
+    z: Any,
+    exists: Any = True,
+) -> Dict[str, Any]:
+    """Set and verify one explicit marker trajectory sample through the official SDK."""
+    normalized_subject = _bounded_text(subject, label="subject", maximum=256)
+    normalized_marker = _bounded_text(marker, label="marker", maximum=256)
+    normalized_frame = _validated_frame(frame, label="frame")
+    normalized_position = [
+        _bounded_float(value, label=label, minimum=-1_000_000_000.0, maximum=1_000_000_000.0)
+        for label, value in (("x", x), ("y", y), ("z", z))
+    ]
+    normalized_exists = _validated_bool(exists)
+    client = connect_client()
+    previous_x, previous_y, previous_z, previous_exists = client.GetTrajectoryAtFrame(
+        normalized_subject, normalized_marker, normalized_frame
+    )
+    client.SetTrajectoryAtFrame(
+        normalized_subject,
+        normalized_marker,
+        normalized_frame,
+        normalized_position[0],
+        normalized_position[1],
+        normalized_position[2],
+        normalized_exists,
+    )
+    current_x, current_y, current_z, current_exists = client.GetTrajectoryAtFrame(
+        normalized_subject, normalized_marker, normalized_frame
+    )
+    current_position = [float(current_x), float(current_y), float(current_z)]
+    verified = bool(current_exists) is normalized_exists and all(
+        math.isclose(actual, requested, rel_tol=1e-9, abs_tol=1e-6)
+        for actual, requested in zip(current_position, normalized_position)
+    )
+    if not verified:
+        try:
+            client.SetTrajectoryAtFrame(
+                normalized_subject,
+                normalized_marker,
+                normalized_frame,
+                float(previous_x),
+                float(previous_y),
+                float(previous_z),
+                bool(previous_exists),
+            )
+        except Exception:
+            pass
+        raise RuntimeError("Shogun did not verify the requested trajectory sample")
+    return {
+        "subject": normalized_subject,
+        "marker": normalized_marker,
+        "frame": normalized_frame,
+        "previous": {
+            "position": [float(previous_x), float(previous_y), float(previous_z)],
+            "exists": bool(previous_exists),
+        },
+        "current": {"position": current_position, "exists": bool(current_exists)},
+        "verified": True,
+    }
+
+
 def list_scene_objects(
     max_objects: int = 500,
     object_type: str = "",
@@ -460,11 +536,7 @@ def list_object_channels(object_path: str, max_channels: int = 200) -> Dict[str,
 def channel_sample(object_path: str, channel_name: str, frame: int) -> Dict[str, Any]:
     """Read one explicit channel at one explicit frame."""
     frame = _validated_frame(frame, label="frame")
-    name = _bounded_text(channel_name, label="channel_name", maximum=256)
-    value = _scene_object(official_interface("Scene"), object_path)
-    channel = value.Channels[name]
-    if channel is None:
-        raise ValueError("channel was not found")
+    value, name, channel = _object_channel(official_interface("Scene"), object_path, channel_name)
     return {
         "object": _object_summary(value),
         "channel": name,
@@ -483,11 +555,7 @@ def list_channel_gaps(
 ) -> Dict[str, Any]:
     """Return a bounded gap summary for one explicit channel."""
     _bounded_limit(max_gaps, label="max_gaps", maximum=MAX_CHANNEL_GAPS)
-    name = _bounded_text(channel_name, label="channel_name", maximum=256)
-    value = _scene_object(official_interface("Scene"), object_path)
-    channel = value.Channels[name]
-    if channel is None:
-        raise ValueError("channel was not found")
+    value, name, channel = _object_channel(official_interface("Scene"), object_path, channel_name)
     gaps = list(channel.GetGaps(bool(any_subchannel)))
     normalized = [{"start": int(start), "end": int(end)} for start, end in gaps[:max_gaps]]
     return {
@@ -497,6 +565,133 @@ def list_channel_gaps(
         "gaps": normalized,
         "gap_count": len(gaps),
         "truncated": len(gaps) > max_gaps,
+    }
+
+
+def select_channel_keys(object_path: str, channel_name: str, selection_mode: str) -> Dict[str, Any]:
+    """Apply one allowlisted key-selection operation to an explicit channel."""
+    operations = {
+        "selected_ranges": "SelectKeysFromRanges",
+        "all": "SelectAllKeys",
+        "clear": "DeselectAllKeys",
+        "invert": "InvertKeySelection",
+    }
+    method_name = operations.get(selection_mode)
+    if method_name is None:
+        raise ValueError("selection_mode must be selected_ranges, all, clear, or invert")
+    value, name, channel = _object_channel(official_interface("Scene"), object_path, channel_name)
+    getattr(channel, method_name)()
+    return {
+        "object_path": str(value.Path),
+        "channel": name,
+        "selection_mode": selection_mode,
+    }
+
+
+def delete_channel_keys(
+    object_path: str,
+    channel_name: str,
+    *,
+    delete_mode: str,
+    frame: Union[int, None] = None,
+) -> Dict[str, Any]:
+    """Delete one explicit key or the current selected keys; never delete every key implicitly."""
+    if delete_mode not in {"frame", "selected"}:
+        raise ValueError("delete_mode must be frame or selected")
+    normalized_frame = None
+    if delete_mode == "frame":
+        if frame is None:
+            raise ValueError("frame is required when delete_mode is frame")
+        normalized_frame = _validated_frame(frame, label="frame")
+    elif frame is not None:
+        raise ValueError("frame is only supported when delete_mode is frame")
+
+    value, name, channel = _object_channel(official_interface("Scene"), object_path, channel_name)
+    key_existed: Union[bool, None]
+    if delete_mode == "frame":
+        key_existed = bool(channel.HasKey(normalized_frame))
+        channel.DeleteKey(normalized_frame)
+    else:
+        key_existed = None
+        channel.DeleteSelectedKeys()
+    return {
+        "object_path": str(value.Path),
+        "channel": name,
+        "delete_mode": delete_mode,
+        "frame": normalized_frame,
+        "key_existed": key_existed,
+    }
+
+
+def apply_fir_filter(
+    object_path: str,
+    channel_name: str,
+    *,
+    selected_keys_only: Any = True,
+    length: Any = 49,
+    transition_width: Any = 0.0198,
+    light_cutoff: Any = 0.3,
+    threshold: Any = 15.0,
+) -> Dict[str, Any]:
+    """Apply Vicon's bounded FIR filter to one explicit channel."""
+    normalized_length = _bounded_int(length, label="length", minimum=3, maximum=1001)
+    if normalized_length % 2 == 0:
+        raise ValueError("length must be odd")
+    normalized = {
+        "selected_keys_only": _validated_bool(selected_keys_only),
+        "length": normalized_length,
+        "transition_width": _bounded_float(
+            transition_width, label="transition_width", minimum=0.0001, maximum=1.0
+        ),
+        "light_cutoff": _bounded_float(
+            light_cutoff, label="light_cutoff", minimum=0.0, maximum=1000.0
+        ),
+        "threshold": _bounded_float(threshold, label="threshold", minimum=0.0, maximum=100.0),
+    }
+    value, name, channel = _object_channel(official_interface("Scene"), object_path, channel_name)
+    sdk_filter = official_type("FIRFilter")
+    sdk_filter.SelectedKeysOnly = normalized["selected_keys_only"]
+    sdk_filter.Length = normalized["length"]
+    sdk_filter.TransitionWidth = normalized["transition_width"]
+    sdk_filter.LightCutoff = normalized["light_cutoff"]
+    sdk_filter.Threshold = normalized["threshold"]
+    sdk_filter.Apply(channel)
+    return {
+        "object_path": str(value.Path),
+        "channel": name,
+        "filter": "fir",
+        **normalized,
+    }
+
+
+def apply_weighted_average_filter(
+    object_path: str,
+    channel_name: str,
+    *,
+    selected_keys_only: Any = True,
+    width: Any = 3,
+    strength: Any = 5,
+) -> Dict[str, Any]:
+    """Apply Vicon's bounded weighted-average filter to one explicit channel."""
+    normalized_width = _bounded_int(width, label="width", minimum=1, maximum=101)
+    if normalized_width % 2 == 0:
+        raise ValueError("width must be odd")
+    normalized = {
+        "selected_keys_only": _validated_bool(selected_keys_only),
+        "width": normalized_width,
+        "strength": _bounded_int(strength, label="strength", minimum=1, maximum=10),
+    }
+    value, name, channel = _object_channel(official_interface("Scene"), object_path, channel_name)
+    sdk_filter = official_type("WeightedAverageFilter")
+    sdk_filter.SelectedKeysOnly = normalized["selected_keys_only"]
+    sdk_filter.Width = normalized["width"]
+    sdk_filter.Strength = normalized["strength"]
+    sdk_filter.Apply(channel)
+    return {
+        "object_path": str(value.Path),
+        "channel": name,
+        "filter": "weighted_average",
+        **normalized,
     }
 
 
@@ -882,7 +1077,7 @@ def _bounded_float(value: Any, *, label: str, minimum: float, maximum: float) ->
         raise ValueError(f"{label} must be a number")
     normalized = float(value)
     if not math.isfinite(normalized) or not minimum <= normalized <= maximum:
-        raise ValueError(f"{label} must be between {minimum} and {maximum}")
+        raise ValueError(f"{label} must be finite and between {minimum} and {maximum}")
     return normalized
 
 

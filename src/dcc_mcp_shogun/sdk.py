@@ -18,6 +18,10 @@ CONTROL_PORT_MAX = 899
 _configured_control_port: Optional[int] = None
 _interface_connection: Any = None
 _INTERFACE_CLASSES = {"Offline", "Scene", "Timeline"}
+_SDK_TYPES = {
+    "FIRFilter": ("Filter", "FIRFilter"),
+    "WeightedAverageFilter": ("Filter", "WeightedAverageFilter"),
+}
 
 
 class _TcpRowOwnerPid(ctypes.Structure):
@@ -260,3 +264,19 @@ def official_interface(name: str) -> Any:
         return interface_class()
     except (ImportError, AttributeError) as error:
         raise ShogunSdkError(f"The official {name} SDK interface is unavailable") from error
+
+
+def official_type(name: str) -> Any:
+    """Create one allowlisted helper type from Vicon's official SDK package."""
+    global _interface_connection
+    target = _SDK_TYPES.get(name)
+    if target is None:
+        raise ShogunSdkError(f"{name} is not an enabled SDK type")
+    _interface_connection = connect_client()
+    module_name, type_name = target
+    try:
+        module = importlib.import_module(f"ViconShogunPostSDK.{module_name}")
+        sdk_type = getattr(module, type_name)
+        return sdk_type()
+    except (ImportError, AttributeError) as error:
+        raise ShogunSdkError(f"The official {name} SDK type is unavailable") from error

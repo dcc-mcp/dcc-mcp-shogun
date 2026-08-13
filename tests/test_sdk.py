@@ -84,3 +84,18 @@ def test_official_scene_interface_is_allowlisted(monkeypatch):
     monkeypatch.setattr(sdk, "connect_client", object)
 
     assert sdk.official_interface("Scene") is scene
+
+
+def test_official_filter_types_are_connected_and_allowlisted(monkeypatch):
+    fir = object()
+    module = types.SimpleNamespace(FIRFilter=lambda: fir)
+    monkeypatch.setitem(sys.modules, "ViconShogunPostSDK.Filter", module)
+    connection = object()
+    monkeypatch.setattr(sdk, "_interface_connection", None)
+    monkeypatch.setattr(sdk, "connect_client", lambda: connection)
+
+    assert sdk.official_type("FIRFilter") is fir
+    assert sdk._interface_connection is connection
+
+    with pytest.raises(sdk.ShogunSdkError, match="not an enabled SDK type"):
+        sdk.official_type("ArbitraryFilter")

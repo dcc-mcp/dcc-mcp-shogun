@@ -403,7 +403,7 @@ wheels = [
 
 [[package]]
 name = "dcc-mcp-shogun"
-version = "0.1.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "dcc-mcp-core" },

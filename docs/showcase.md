@@ -14,7 +14,9 @@ studio capture data, installation paths, machine names, or credentials.
    the typed `shogun-files` Skill.
 7. Probe the official `Scene`, `Timeline`, and `Offline` interfaces through
    their typed Skills without running UI fallback.
-8. Continue to save/export only when the selected host build accepts the import;
+8. On a disposable recovery copy, probe the official channel-key and filtering
+   contracts through `shogun-editing`, then re-inspect the affected sample.
+9. Continue to save/export only when the selected host build accepts the import;
    otherwise retain the fail-closed result as compatibility evidence.
 
 ## Reproduce
@@ -29,6 +31,8 @@ dcc-mcp-cli load-skill shogun-timeline --dcc-type shogun --instance-id <instance
 dcc-mcp-cli call <instance>.shogun_timeline__inspect_timeline --json '{}' --wait
 dcc-mcp-cli load-skill shogun-processing --dcc-type shogun --instance-id <instance>
 dcc-mcp-cli call <instance>.shogun_processing__inspect_processing_settings --json '{"section":"reconstruct"}' --wait
+dcc-mcp-cli load-skill shogun-editing --dcc-type shogun --instance-id <instance>
+dcc-mcp-cli call <instance>.shogun_editing__select_channel_keys --json-file select-keys.json --wait
 dcc-mcp-cli load-skill shogun-files --dcc-type shogun --instance-id <instance>
 dcc-mcp-cli call <instance>.shogun_files__import_motion --json-file import.json --wait
 ```
@@ -52,6 +56,13 @@ not included.
   interface commands as invalid for that host application; typed calls return
   bounded errors, so support is not overclaimed and no processing mutation is
   attempted;
+- channel editing and filtering expose only allowlisted official SDK calls;
+  `DeleteAllKeys`, arbitrary HSL, arbitrary Python, and bulk trajectory writes
+  remain unavailable;
+- a live 1.19 empty-scene probe loaded and dispatched all five editing tools;
+  each returned the same bounded `ControlError`, and a typed re-inspection
+  confirmed zero frames and zero subjects. Filter effects on a non-empty
+  disposable take remain a separate acceptance requirement;
 - returned scene paths are reduced to file names;
 - vendor exceptions are reduced to exception class names without tracebacks;
 - unit tests, skill validation, package build, metadata check, and CI all pass.
