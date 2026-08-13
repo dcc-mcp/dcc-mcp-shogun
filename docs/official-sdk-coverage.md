@@ -9,6 +9,7 @@ Sources:
 
 - [Shogun Post 1.18 documentation](https://vicon-help.atlassian.net/wiki/spaces/ShogunPost118/overview)
 - [Python scripting with Vicon Shogun Post](https://vicon-help.atlassian.net/wiki/spaces/ShogunPost118/pages/544283341/Python%2Bscripting%2Bwith%2BVicon%2BShogun%2BPost)
+- [Use Vicon ShogunPost SDK interfaces](https://vicon-help.atlassian.net/wiki/spaces/ShogunPost116/pages/341120839/Use%2BVicon%2BShogunPost%2BSDK%2Binterfaces)
 - [Automatically set up a retarget](https://vicon-help.atlassian.net/wiki/spaces/ShogunPost118/pages/544277621)
 - [Create constraints script](https://vicon-help.atlassian.net/wiki/spaces/ShogunPost118/pages/544279197/createConstraintsScript)
 - [Rigid-body command](https://vicon-help.atlassian.net/wiki/spaces/Shogun111/pages/13208318/rigidBody)
@@ -28,12 +29,16 @@ Sources:
 
 Total: 66 typed tools across six progressively loaded Skills.
 
-A wheel-installed adapter registered all 27 `shogun-scene` tools in a live
-Shogun Post 1.19 blank scene. `inspect_scene`, `list_scene_objects`,
-`list_rigid_bodies`, and `list_video_cameras` completed successfully with empty,
-bounded results. Missing-object probes for setup parameters, rigid-body details,
-and video-camera details returned sanitized `ControlError` results; a follow-up
-scene inspection completed and the exact host process remained available.
+Wheel-installed and public-PyPI adapters registered all 27 `shogun-scene` tools
+in live Shogun Post 1.19 hosts. In an initialized 100-frame blank session,
+`inspect_scene`, `list_scene_objects`, `list_rigid_bodies`, and
+`list_video_cameras` completed successfully with empty, bounded results.
+Missing-object detail probes returned sanitized `ControlError` results.
+
+A separate fresh zero-frame placeholder session accepted `inspect_scene` but
+rejected the official Scene object-list commands with the same bounded
+`ControlError`. A follow-up inspection completed and the exact host process
+remained available. This state is not reported as an empty object inventory.
 Successful object-detail reads still require a disposable non-empty scene.
 
 The five editing tools have been loaded and dispatched through a live Shogun
