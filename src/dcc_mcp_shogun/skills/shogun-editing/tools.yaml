@@ -1,0 +1,145 @@
+tools:
+  - name: set_trajectory_sample
+    description: Set and verify one explicit marker trajectory sample at one frame.
+    source_file: scripts/set_trajectory_sample.py
+    input_schema:
+      type: object
+      required: [subject, marker, frame, x, y, z]
+      properties:
+        subject: {type: string, minLength: 1, maxLength: 256}
+        marker: {type: string, minLength: 1, maxLength: 256}
+        frame: {type: integer, minimum: 0, maximum: 2147483647}
+        x: {type: number, minimum: -1000000000, maximum: 1000000000}
+        y: {type: number, minimum: -1000000000, maximum: 1000000000}
+        z: {type: number, minimum: -1000000000, maximum: 1000000000}
+        exists: {type: boolean, default: true}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 15
+    annotations:
+      read_only_hint: false
+      destructive_hint: true
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    call_examples:
+      - arguments: {subject: Performer, marker: LFHD, frame: 120, x: 12.5, y: 34.0, z: 1567.2, exists: true}
+        note: Replace one known marker sample and verify the stored value.
+    next-tools:
+      on-success: [shogun_scene__get_trajectory_at_frame]
+
+  - name: select_channel_keys
+    description: Select, clear, or invert keys on one explicit object channel.
+    source_file: scripts/select_channel_keys.py
+    input_schema:
+      type: object
+      required: [object_path, channel_name, selection_mode]
+      properties:
+        object_path: {type: string, minLength: 1, maxLength: 2048}
+        channel_name: {type: string, minLength: 1, maxLength: 256}
+        selection_mode: {type: string, enum: [selected_ranges, all, clear, invert]}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 10
+    annotations:
+      read_only_hint: false
+      destructive_hint: false
+      idempotent_hint: false
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-success: [shogun_editing__apply_fir_filter, shogun_editing__apply_weighted_average_filter]
+
+  - name: delete_channel_keys
+    description: Delete one key at an explicit frame or the currently selected keys; never all keys implicitly.
+    source_file: scripts/delete_channel_keys.py
+    input_schema:
+      type: object
+      required: [object_path, channel_name, delete_mode]
+      properties:
+        object_path: {type: string, minLength: 1, maxLength: 2048}
+        channel_name: {type: string, minLength: 1, maxLength: 256}
+        delete_mode: {type: string, enum: [frame, selected]}
+        frame: {type: integer, minimum: 0, maximum: 2147483647}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 10
+    annotations:
+      read_only_hint: false
+      destructive_hint: true
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    call_examples:
+      - arguments: {object_path: /Subjects/Performer/Labeling/LFHD, channel_name: Translation, delete_mode: frame, frame: 120}
+        note: Delete only the key at frame 120 if one exists.
+    next-tools:
+      on-success: [shogun_scene__get_channel_sample, shogun_scene__list_channel_gaps]
+
+  - name: apply_fir_filter
+    description: Apply Vicon's FIR filter to one explicit channel with bounded noise-reduction settings.
+    source_file: scripts/apply_fir_filter.py
+    input_schema:
+      type: object
+      required: [object_path, channel_name]
+      properties:
+        object_path: {type: string, minLength: 1, maxLength: 2048}
+        channel_name: {type: string, minLength: 1, maxLength: 256}
+        selected_keys_only: {type: boolean, default: true}
+        length: {type: integer, minimum: 3, maximum: 1001, default: 49}
+        transition_width: {type: number, minimum: 0.0001, maximum: 1, default: 0.0198}
+        light_cutoff: {type: number, minimum: 0, maximum: 1000, default: 0.3}
+        threshold: {type: number, minimum: 0, maximum: 100, default: 15}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations:
+      read_only_hint: false
+      destructive_hint: true
+      idempotent_hint: false
+      open_world_hint: false
+      deferred_hint: false
+    call_examples:
+      - arguments: {object_path: /Subjects/Performer/Labeling/LFHD, channel_name: Translation, selected_keys_only: true, length: 49, transition_width: 0.0198, light_cutoff: 0.3, threshold: 15}
+        note: Apply the manual's conservative cleanup defaults to selected keys.
+    next-tools:
+      on-success: [shogun_scene__get_channel_sample, shogun_scene__list_channel_gaps]
+
+  - name: apply_weighted_average_filter
+    description: Apply Vicon's weighted-average filter to one explicit channel with bounded width and strength.
+    source_file: scripts/apply_weighted_average_filter.py
+    input_schema:
+      type: object
+      required: [object_path, channel_name]
+      properties:
+        object_path: {type: string, minLength: 1, maxLength: 2048}
+        channel_name: {type: string, minLength: 1, maxLength: 256}
+        selected_keys_only: {type: boolean, default: true}
+        width: {type: integer, minimum: 1, maximum: 101, default: 3}
+        strength: {type: integer, minimum: 1, maximum: 10, default: 5}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations:
+      read_only_hint: false
+      destructive_hint: true
+      idempotent_hint: false
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-success: [shogun_scene__get_channel_sample, shogun_scene__list_channel_gaps]

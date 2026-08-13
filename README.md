@@ -7,14 +7,15 @@
 [![Python](https://img.shields.io/pypi/pyversions/dcc-mcp-shogun.svg)](https://pypi.org/project/dcc-mcp-shogun/)
 
 A typed, local-first DCC-MCP adapter for Vicon Shogun Post motion-capture
-inspection, timeline control, bounded processing, and file workflows.
+inspection, timeline control, bounded cleanup, processing, and file workflows.
 
 ![Motion data to typed tools to verified scene](docs/images/shogun-scene-showcase.webp)
 
 The adapter uses Vicon's official local `ViconShogunPost` control-stream SDK and
-its `Scene`, `Timeline`, and `Offline` interfaces. It does not expose arbitrary
-Python or HSL execution. Application controls not exposed by the SDK remain an
-explicit, exact-window DCC UI Control fallback.
+its `Scene`, `Timeline`, `Offline`, `Channel`, `FIRFilter`, and
+`WeightedAverageFilter` contracts. It does not expose arbitrary Python or HSL
+execution. Application controls not exposed by the SDK remain an explicit,
+exact-window DCC UI Control fallback.
 
 Shogun Post ships an external Python SDK. The adapter runs in its own Python
 process and connects to the application's local control stream; it does not rely
@@ -33,6 +34,9 @@ on a general-purpose Python interpreter embedded in the Shogun Post UI.
 - inspect and explicitly change current frame, selected time ranges,
   range selection derived from keys, play/animation ranges, and playback through
   the capability-gated `Timeline` interface;
+- repair one explicit marker sample with read-back verification; select channel
+  keys from the current ranges, delete one explicit key or selected keys, and
+  apply bounded FIR or weighted-average filtering that defaults to selected keys;
 - inspect a stable allowlist of processing settings and invoke reconstruct,
   ROM labeling, subject calibration, auto-label, occlusion fixing, solve,
   QuickPost, or retarget through the official `Offline` interface; reconstruction,
@@ -41,14 +45,17 @@ on a general-purpose Python interpreter embedded in the Shogun Post UI.
   the official SDK;
 - register one Shogun Post GUI instance with the DCC-MCP local gateway.
 
-The mutating surface is deliberately narrow. Processing requires an explicit
+The mutating surface is deliberately narrow. Cleanup never exposes the SDK's
+unbounded `DeleteAllKeys` operation. Single-sample writes are finite and bounded,
+return the previous value, and fail if Shogun does not return the requested
+sample. Processing requires an explicit
 `current_frame` or `selected_ranges` scope; the complete play range is not an
 available implicit default. The adapter does not expose scene replacement,
-arbitrary HSL/Python execution, or raw trajectory writes. Existing outputs fail
-closed unless `overwrite=true`, and public results omit full file-system paths.
-The Scene surface does not expose object creation, removal, reparenting, raw
-attribute/channel writes, or raw trajectory mutation. Attribute values and camera
-device identifiers are intentionally omitted from inspection results.
+arbitrary HSL/Python execution, or bulk raw trajectory writes. Existing outputs
+fail closed unless `overwrite=true`, and public results omit full file-system
+paths. The Scene surface does not expose object creation, removal, reparenting,
+or raw attribute writes. Attribute values and camera device identifiers are
+intentionally omitted from inspection results.
 
 The subject, marker, skeleton, constraint, parameter, and trajectory queries in
 `shogun-scene` are live-validated against Shogun Post 1.19. The newer official
@@ -66,9 +73,20 @@ capability-gated: their schemas and SDK mappings are tested, while 1.19 support
 is not claimed. A rejection is returned as a bounded typed error and never
 triggers UI automation.
 
+`shogun-editing` is separately capability-gated. Its schemas and SDK mappings
+are tested against the 1.19 SDK contract. All five tools were also loaded and
+dispatched through a live 1.19 host: against an empty scene, each mutation was
+safely rejected as a bounded `ControlError`, with the scene remaining empty.
+Trajectory write and filter effects on a non-empty disposable take are not yet
+claimed as live-validated. A host-build or scene-state rejection never falls
+back to arbitrary script execution.
+
 The implemented contracts follow Vicon's official
-[Python SDK interface guide](https://vicon-help.atlassian.net/wiki/spaces/ShogunPost116/pages/341120839/Use%2BVicon%2BShogunPost%2BSDK%2Binterfaces)
+[Shogun Post documentation](https://vicon-help.atlassian.net/wiki/spaces/ShogunPost118/overview),
+[Python scripting guide](https://vicon-help.atlassian.net/wiki/spaces/ShogunPost118/pages/544283341/Python%2Bscripting%2Bwith%2BVicon%2BShogun%2BPost),
 and [HSL command reference](https://help.vicon.com/download/attachments/196380086/HSL%20scripting%20with%20Vicon%20Shogun.pdf).
+See the maintained [official SDK coverage matrix](docs/official-sdk-coverage.md)
+for implemented and intentionally deferred interface families.
 
 ## Showcase
 
@@ -116,8 +134,9 @@ python -m build
 - Errors report exception classes, not SDK install paths or machine details.
 - Attribute inspection returns names only, and camera summaries omit device IDs.
 - The scene Skill limits mutation to selection and display state; the file Skill
-  exposes only bounded import/save/export operations; processing never defaults
-  to the full play range.
+  exposes only bounded import/save/export operations; editing requires an
+  explicit object/channel or subject/marker/frame; processing never defaults to
+  the full play range.
 - Authentication, licensing, UAC, and security dialogs are never automated.
 
 Vicon and Shogun are trademarks of Vicon Motion Systems Ltd. This independent

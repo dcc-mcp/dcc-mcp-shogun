@@ -10,6 +10,7 @@ from dcc_mcp_shogun import runtime
 class FakeClient:
     def __init__(self):
         self.calls = []
+        self.trajectory_overrides = {}
 
     def GetSceneName(self):
         return "C:/private/show/shot", "C:/private/show/shot/Take01.vdf"
@@ -51,7 +52,14 @@ class FakeClient:
         return 1.8, "m", 1.7, True
 
     def GetTrajectoryAtFrame(self, subject, marker, frame):
+        override = self.trajectory_overrides.get((subject, marker, frame))
+        if override is not None:
+            return override
         return float(frame), float(frame + 1), float(frame + 2), frame != 6
+
+    def SetTrajectoryAtFrame(self, subject, marker, frame, x, y, z, exists):
+        self.calls.append(("SetTrajectoryAtFrame", subject, marker, frame, x, y, z, exists))
+        self.trajectory_overrides[(subject, marker, frame)] = (x, y, z, exists)
 
     def ImportFile(self, filename, import_type, create_second_figure):
         self.calls.append(("ImportFile", filename, import_type, create_second_figure))
@@ -256,6 +264,7 @@ class FakeChannel:
         self.Name = name
         self._value = value
         self._gaps = list(gaps)
+        self.calls = []
 
     def __getitem__(self, frame):
         assert frame == 42
@@ -268,6 +277,27 @@ class FakeChannel:
     def GetGaps(self, any_subchannel=False):
         assert isinstance(any_subchannel, bool)
         return list(self._gaps)
+
+    def SelectKeysFromRanges(self):
+        self.calls.append(("SelectKeysFromRanges",))
+
+    def DeselectKeysFromRanges(self):
+        self.calls.append(("DeselectKeysFromRanges",))
+
+    def SelectAllKeys(self):
+        self.calls.append(("SelectAllKeys",))
+
+    def DeselectAllKeys(self):
+        self.calls.append(("DeselectAllKeys",))
+
+    def InvertKeySelection(self):
+        self.calls.append(("InvertKeySelection",))
+
+    def DeleteKey(self, frame):
+        self.calls.append(("DeleteKey", frame))
+
+    def DeleteSelectedKeys(self):
+        self.calls.append(("DeleteSelectedKeys",))
 
 
 class FakeNamedList:
@@ -436,6 +466,211 @@ def test_trajectory_window_is_inclusive_and_bounded(client):
     }
     with pytest.raises(ValueError, match="at most 2000"):
         runtime.trajectory_window("PerformerA", "LFHD", 0, 2000)
+
+
+def test_trajectory_sample_update_is_typed_verified_and_bounded(client):
+    result = runtime.set_trajectory_sample(
+        "PerformerA",
+        "LFHD",
+        5,
+        x=101.25,
+        y=-22.5,
+        z=3.0,
+        exists=True,
+    )
+    assert result == {
+        "subject": "PerformerA",
+        "marker": "LFHD",
+        "frame": 5,
+        "previous": {"position": [5.0, 6.0, 7.0], "exists": True},
+        "current": {"position": [101.25, -22.5, 3.0], "exists": True},
+        "verified": True,
+    }
+    assert client.calls[-1] == (
+        "SetTrajectoryAtFrame",
+        "PerformerA",
+        "LFHD",
+        5,
+        101.25,
+        -22.5,
+        3.0,
+        True,
+    )
+
+    with pytest.raises(ValueError, match="finite"):
+        runtime.set_trajectory_sample("PerformerA", "LFHD", 5, x=float("nan"), y=0, z=0)
+    with pytest.raises(ValueError, match="marker"):
+        runtime.set_trajectory_sample("PerformerA", " ", 5, x=0, y=0, z=0)
+    assert len(client.calls) == 1
+
+
+def test_trajectory_sample_restores_previous_value_after_verification_failure(monkeypatch):
+    client = FakeClient()
+    attempts = 0
+
+    def mismatching_set(subject, marker, frame, x, y, z, exists):
+        nonlocal attempts
+        attempts += 1
+        client.calls.append(("SetTrajectoryAtFrame", subject, marker, frame, x, y, z, exists))
+        if attempts == 1:
+            client.trajectory_overrides[(subject, marker, frame)] = (x + 1.0, y, z, exists)
+        else:
+            client.trajectory_overrides[(subject, marker, frame)] = (x, y, z, exists)
+
+    client.SetTrajectoryAtFrame = mismatching_set
+    monkeypatch.setattr(runtime, "connect_client", lambda: client)
+
+    with pytest.raises(RuntimeError, match="did not verify"):
+        runtime.set_trajectory_sample("PerformerA", "LFHD", 5, x=1, y=2, z=3)
+    assert client.calls[-1] == (
+        "SetTrajectoryAtFrame",
+        "PerformerA",
+        "LFHD",
+        5,
+        5.0,
+        6.0,
+        7.0,
+        True,
+    )
+
+
+def test_channel_key_selection_maps_only_allowlisted_sdk_operations(monkeypatch):
+    scene = FakeScene()
+    channel = scene.root.Channels["Translation"]
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+
+    for mode in ("selected_ranges", "all", "clear", "invert"):
+        assert runtime.select_channel_keys("/Actor", "Translation", mode) == {
+            "object_path": "/Actor",
+            "channel": "Translation",
+            "selection_mode": mode,
+        }
+    assert channel.calls == [
+        ("SelectKeysFromRanges",),
+        ("SelectAllKeys",),
+        ("DeselectAllKeys",),
+        ("InvertKeySelection",),
+    ]
+
+    with pytest.raises(ValueError, match="selection_mode"):
+        runtime.select_channel_keys("/Actor", "Translation", "arbitrary")
+
+
+def test_delete_channel_keys_forbids_unbounded_delete_all(monkeypatch):
+    scene = FakeScene()
+    channel = scene.root.Channels["Translation"]
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+
+    assert runtime.delete_channel_keys("/Actor", "Translation", delete_mode="frame", frame=42) == {
+        "object_path": "/Actor",
+        "channel": "Translation",
+        "delete_mode": "frame",
+        "frame": 42,
+        "key_existed": True,
+    }
+    assert runtime.delete_channel_keys("/Actor", "Translation", delete_mode="selected") == {
+        "object_path": "/Actor",
+        "channel": "Translation",
+        "delete_mode": "selected",
+        "frame": None,
+        "key_existed": None,
+    }
+    assert channel.calls == [("DeleteKey", 42), ("DeleteSelectedKeys",)]
+
+    with pytest.raises(ValueError, match="frame is required"):
+        runtime.delete_channel_keys("/Actor", "Translation", delete_mode="frame")
+    with pytest.raises(ValueError, match="delete_mode"):
+        runtime.delete_channel_keys("/Actor", "Translation", delete_mode="all")
+    assert all(call[0] != "DeleteAllKeys" for call in channel.calls)
+
+
+class FakeFilter:
+    def __init__(self):
+        self.calls = []
+
+    def Apply(self, channel):
+        self.calls.append(channel)
+
+
+def test_fir_filter_uses_official_filter_contract_and_validates_boundaries(monkeypatch):
+    scene = FakeScene()
+    created = []
+
+    def factory(name):
+        assert name == "FIRFilter"
+        value = FakeFilter()
+        created.append(value)
+        return value
+
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+    monkeypatch.setattr(runtime, "official_type", factory)
+
+    result = runtime.apply_fir_filter(
+        "/Actor",
+        "Translation",
+        selected_keys_only=True,
+        length=49,
+        transition_width=0.0198,
+        light_cutoff=0.3,
+        threshold=15.0,
+    )
+    filter_value = created[-1]
+    assert result == {
+        "object_path": "/Actor",
+        "channel": "Translation",
+        "filter": "fir",
+        "selected_keys_only": True,
+        "length": 49,
+        "transition_width": 0.0198,
+        "light_cutoff": 0.3,
+        "threshold": 15.0,
+    }
+    assert filter_value.SelectedKeysOnly is True
+    assert filter_value.Length == 49
+    assert filter_value.TransitionWidth == 0.0198
+    assert filter_value.LightCutoff == 0.3
+    assert filter_value.Threshold == 15.0
+    assert filter_value.calls == [scene.root.Channels["Translation"]]
+
+    with pytest.raises(ValueError, match="odd"):
+        runtime.apply_fir_filter("/Actor", "Translation", length=48)
+    with pytest.raises(ValueError, match="threshold"):
+        runtime.apply_fir_filter("/Actor", "Translation", threshold=101)
+
+
+def test_weighted_average_filter_maps_official_width_and_strength(monkeypatch):
+    scene = FakeScene()
+    created = []
+
+    def factory(name):
+        assert name == "WeightedAverageFilter"
+        value = FakeFilter()
+        created.append(value)
+        return value
+
+    monkeypatch.setattr(runtime, "official_interface", lambda name: scene)
+    monkeypatch.setattr(runtime, "official_type", factory)
+
+    assert runtime.apply_weighted_average_filter(
+        "/Actor", "Translation", selected_keys_only=False, width=5, strength=7
+    ) == {
+        "object_path": "/Actor",
+        "channel": "Translation",
+        "filter": "weighted_average",
+        "selected_keys_only": False,
+        "width": 5,
+        "strength": 7,
+    }
+    value = created[-1]
+    assert value.SelectedKeysOnly is False
+    assert value.Width == 5
+    assert value.Strength == 7
+    assert value.calls == [scene.root.Channels["Translation"]]
+
+    with pytest.raises(ValueError, match="odd"):
+        runtime.apply_weighted_average_filter("/Actor", "Translation", width=2)
+    with pytest.raises(ValueError, match="strength"):
+        runtime.apply_weighted_average_filter("/Actor", "Translation", strength=11)
 
 
 def test_scene_object_reads_are_bounded_and_typed(monkeypatch):
