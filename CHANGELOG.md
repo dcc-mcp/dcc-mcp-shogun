@@ -11,6 +11,13 @@
 - Add ROM labeling, subject calibration, QuickPost, and expanded processing
   settings from the official `Offline` interface.
 
+## [0.8.1](https://github.com/dcc-mcp/dcc-mcp-shogun/compare/v0.8.0...v0.8.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **docs:** clarify Shogun blank-scene host states ([#16](https://github.com/dcc-mcp/dcc-mcp-shogun/issues/16)) ([79d59bf](https://github.com/dcc-mcp/dcc-mcp-shogun/commit/79d59bf302749b3581aff0359b1f3c5019b61c26))
+
 ## [0.8.0](https://github.com/dcc-mcp/dcc-mcp-shogun/compare/v0.7.0...v0.8.0) (2026-08-13)
 
 
