@@ -9,20 +9,32 @@ Sources:
 
 - [Shogun Post 1.18 documentation](https://vicon-help.atlassian.net/wiki/spaces/ShogunPost118/overview)
 - [Python scripting with Vicon Shogun Post](https://vicon-help.atlassian.net/wiki/spaces/ShogunPost118/pages/544283341/Python%2Bscripting%2Bwith%2BVicon%2BShogun%2BPost)
+- [Automatically set up a retarget](https://vicon-help.atlassian.net/wiki/spaces/ShogunPost118/pages/544277621)
+- [Create constraints script](https://vicon-help.atlassian.net/wiki/spaces/ShogunPost118/pages/544279197/createConstraintsScript)
+- [Rigid-body command](https://vicon-help.atlassian.net/wiki/spaces/Shogun111/pages/13208318/rigidBody)
+- [Find non-rigid bodies](https://vicon-help.atlassian.net/wiki/spaces/ShogunPost118/pages/544279719/findNonRigid)
 - Vicon Shogun Post 1.19 installed Python SDK and Getting Started manual
 
 ## Implemented surface
 
 | Skill | Tools | Official contract | Workflow boundary |
 |---|---:|---|---|
-| `shogun-scene` | 22 | `ViconShogunPost`, `Scene`, `Object`, `Channel`, camera and skeleton reads | Bounded inspection plus selection/display state |
+| `shogun-scene` | 27 | `ViconShogunPost`, `Scene`, `Object`, `Channel`, setup, rigid-body, camera, and skeleton reads | Bounded inspection plus selection/display state |
 | `shogun-timeline` | 11 | `Timeline` | Explicit frame/range/playback state |
 | `shogun-processing` | 12 | `Offline` and allowlisted settings | Explicit current-frame or selected-range processing |
 | `shogun-files` | 3 | `ImportFile`, `SaveFile`, `ExportFile` | Extension/size/overwrite-gated file exchange |
 | `shogun-editing` | 5 | trajectory setters, `Channel`, `FIRFilter`, `WeightedAverageFilter` | One verified sample or one explicit channel; filters default to selected keys |
 | `shogun-production-context` | 8 | `Scene.ActiveClip`, `Clip`, `Character` | Bounded timing and QA state plus verified allowlisted updates; identities and notes excluded |
 
-Total: 61 typed tools across six progressively loaded Skills.
+Total: 66 typed tools across six progressively loaded Skills.
+
+A wheel-installed adapter registered all 27 `shogun-scene` tools in a live
+Shogun Post 1.19 blank scene. `inspect_scene`, `list_scene_objects`,
+`list_rigid_bodies`, and `list_video_cameras` completed successfully with empty,
+bounded results. Missing-object probes for setup parameters, rigid-body details,
+and video-camera details returned sanitized `ControlError` results; a follow-up
+scene inspection completed and the exact host process remained available.
+Successful object-detail reads still require a disposable non-empty scene.
 
 The five editing tools have been loaded and dispatched through a live Shogun
 Post 1.19 instance. An empty-scene probe verified fail-closed behavior without
@@ -59,13 +71,28 @@ contract mirrors that workflow while reducing mutation scope:
 - All allowlisted updates validate every input before connecting, verify the
   resulting SDK values, and attempt reverse-order rollback on partial failure.
 
+## Setup, rigid-body, and camera decisions
+
+- Setup inspection accepts only exact `LabelingSetup` or `SolvingSetup` objects.
+  It lists existing static/dynamic parameter values and priors, but returns only
+  `has_expression` for expression-backed values so retarget recipes are not
+  copied into agent output.
+- Parameter creation, deletion, renaming, and expression mutation remain absent.
+  This avoids an ambiguous dynamic-parameter creation return type in the 1.19
+  SDK and keeps recovery-copy workflows operator-owned.
+- Rigid-body inspection uses the official `RigidBody` Scene type filter, reads
+  transforms at one explicit frame, and bounds attached Marker children.
+- `VideoCamera` inspection exposes calibration plus image inversion and
+  sub-sampling. Device identifiers, firmware, capture paths, and video-file
+  metadata remain excluded.
+
 ## Prioritized next families
 
 | Priority | Official SDK family | Planned public boundary |
 |---:|---|---|
-| 1 | labeling/solving setup objects | Typed constraint and parameter recipes for retarget setup, with narrow object types and recovery copies |
-| 2 | optical/video camera properties | Post-safe presentation fields; continue excluding device identifiers and capture-security configuration |
-| 3 | rigid-body inspection | Bounded read-only object, marker, and solve-state summaries before any workflow-specific mutation |
+| 1 | setup-constraint inspection | Exact `LabelingConstraint`/`SolvingConstraint` summaries after non-empty-scene stability evidence |
+| 2 | labeling clusters and bones | Bounded marker/association summaries without creation or generic property mutation |
+| 3 | rigid-body quality analysis | Read-only rigidity/tolerance summaries when the official object API exposes stable values |
 | Deferred | `Database` | An isolated 1.19 read probe coincided with host termination; require reproducible stability evidence before any public tool |
 
 ## Intentionally not exposed

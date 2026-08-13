@@ -505,6 +505,88 @@ def scene_object_details(
     }
 
 
+def list_setup_parameters(
+    object_path: str,
+    parameter_kind: str = "all",
+    max_parameters: int = 500,
+) -> Dict[str, Any]:
+    """List existing labeling/solving setup parameters without returning expressions."""
+    _bounded_limit(max_parameters, label="max_parameters", maximum=10000)
+    if parameter_kind not in {"all", "static", "dynamic"}:
+        raise ValueError("parameter_kind must be all, static, or dynamic")
+    setup = _scene_object(official_interface("Scene"), object_path)
+    if str(setup.Type) not in {"LabelingSetup", "SolvingSetup"}:
+        raise ValueError("scene object is not a labeling or solving setup")
+
+    parameters: List[Dict[str, Any]] = []
+    if parameter_kind in {"all", "static"}:
+        for parameter in setup.StaticParameters.ToList():
+            parameters.append(
+                {
+                    "name": str(parameter.Name),
+                    "kind": "static",
+                    "prior": _safe_sdk_value(parameter.Prior),
+                    "user_value": _safe_sdk_value(parameter.UserValue),
+                    "has_expression": bool(str(parameter.Expression)),
+                }
+            )
+    if parameter_kind in {"all", "dynamic"}:
+        for parameter in setup.DynamicParameters.ToList():
+            parameters.append(
+                {
+                    "name": str(parameter.Name),
+                    "kind": "dynamic",
+                    "prior": _safe_sdk_value(parameter.Prior),
+                    "value": _safe_sdk_value(parameter.Value),
+                }
+            )
+    return {
+        "setup": _object_summary(setup),
+        "parameter_kind": parameter_kind,
+        "parameters": parameters[:max_parameters],
+        "parameter_count": len(parameters),
+        "truncated": len(parameters) > max_parameters,
+    }
+
+
+def list_rigid_bodies(max_rigid_bodies: int = 500) -> Dict[str, Any]:
+    """List rigid bodies through the vendor Scene type filter."""
+    _bounded_limit(max_rigid_bodies, label="max_rigid_bodies", maximum=10000)
+    scene = official_interface("Scene")
+    rigid_bodies = list(scene.Objects.FilterByType("RigidBody"))
+    return {
+        "rigid_bodies": [
+            _object_summary(rigid_body) for rigid_body in rigid_bodies[:max_rigid_bodies]
+        ],
+        "rigid_body_count": len(rigid_bodies),
+        "truncated": len(rigid_bodies) > max_rigid_bodies,
+    }
+
+
+def rigid_body_details(
+    object_path: str,
+    frame: int,
+    max_markers: int = 100,
+) -> Dict[str, Any]:
+    """Read one rigid body's transform and bounded attached-marker inventory."""
+    frame = _validated_frame(frame, label="frame")
+    _bounded_limit(max_markers, label="max_markers", maximum=10000)
+    rigid_body = _scene_object(official_interface("Scene"), object_path)
+    if str(rigid_body.Type) != "RigidBody":
+        raise ValueError("scene object is not a rigid body")
+    markers = [child for child in rigid_body.GetChildren() if str(child.Type) == "Marker"]
+    return {
+        "rigid_body": _object_summary(rigid_body),
+        "frame": frame,
+        "translation": _vector_value(rigid_body.Translation, frame),
+        "rotation": _vector_value(rigid_body.Rotation, frame),
+        "scale": _vector_value(rigid_body.Scale, frame),
+        "markers": [_object_summary(marker) for marker in markers[:max_markers]],
+        "marker_count": len(markers),
+        "markers_truncated": len(markers) > max_markers,
+    }
+
+
 def list_object_attributes(object_path: str, max_attributes: int = 200) -> Dict[str, Any]:
     """List attribute names only; values may contain private production metadata."""
     _bounded_limit(max_attributes, label="max_attributes", maximum=1000)
@@ -1074,11 +1156,7 @@ def list_optical_cameras(max_cameras: int = 500) -> Dict[str, Any]:
     }
 
 
-def optical_camera_details(object_path: str) -> Dict[str, Any]:
-    """Read stable camera calibration and capture fields, excluding device identifiers."""
-    camera = _scene_object(official_interface("Scene"), object_path)
-    if str(camera.Type) not in {"OpticalCamera", "VideoCamera"}:
-        raise ValueError("scene object is not an optical camera")
+def _camera_details(camera: Any) -> Dict[str, Any]:
     return {
         "camera": _object_summary(camera),
         "camera_number": int(camera.Camera_Number),
@@ -1090,6 +1168,37 @@ def optical_camera_details(object_path: str) -> Dict[str, Any]:
         "sensor_width": int(camera.Sensor_Width),
         "sensor_height": int(camera.Sensor_Height),
         "calibration_residual": float(camera.Residual),
+    }
+
+
+def optical_camera_details(object_path: str) -> Dict[str, Any]:
+    """Read stable camera calibration and capture fields, excluding device identifiers."""
+    camera = _scene_object(official_interface("Scene"), object_path)
+    if str(camera.Type) not in {"OpticalCamera", "VideoCamera"}:
+        raise ValueError("scene object is not an optical camera")
+    return _camera_details(camera)
+
+
+def list_video_cameras(max_cameras: int = 500) -> Dict[str, Any]:
+    """List video cameras without returning capture paths or device identifiers."""
+    _bounded_limit(max_cameras, label="max_cameras", maximum=10000)
+    cameras = list(official_interface("Scene").Objects.FilterByType("VideoCamera"))
+    return {
+        "cameras": [_object_summary(camera) for camera in cameras[:max_cameras]],
+        "camera_count": len(cameras),
+        "truncated": len(cameras) > max_cameras,
+    }
+
+
+def video_camera_details(object_path: str) -> Dict[str, Any]:
+    """Read Post-safe video presentation fields, excluding device and file metadata."""
+    camera = _scene_object(official_interface("Scene"), object_path)
+    if str(camera.Type) != "VideoCamera":
+        raise ValueError("scene object is not a video camera")
+    return {
+        **_camera_details(camera),
+        "image_inverted": bool(camera.Invert),
+        "sub_sample_ratio": _safe_sdk_value(str(camera.Sub_Sample_Ratio)),
     }
 
 

@@ -42,12 +42,22 @@ def test_skills_keep_read_and_mutation_boundaries_explicit():
         / "shogun-scene"
         / "tools.yaml"
     ).read_text(encoding="utf-8")
-    assert scene_skill.count("  - name:") == 22
+    assert scene_skill.count("  - name:") == 27
     for mutation in ("new_scene", "load_file", "save_scene", "import_motion", "set_trajectory"):
         assert mutation not in scene_skill
-    assert scene_skill.count("read_only_hint: true") == 19
+    assert scene_skill.count("read_only_hint: true") == 24
     assert scene_skill.count("read_only_hint: false") == 3
     assert "destructive_hint: true" not in scene_skill
+    for tool_name in (
+        "list_setup_parameters",
+        "list_rigid_bodies",
+        "get_rigid_body_details",
+        "list_video_cameras",
+        "get_video_camera_details",
+    ):
+        assert "  - name: {}".format(tool_name) in scene_skill
+    for private_field in ("Device_ID", "Firmware", "Capture_File_Path", "Video_File"):
+        assert private_field not in scene_skill
 
     files_skill = (
         Path(__file__).parents[1]
@@ -133,8 +143,15 @@ def test_official_sdk_coverage_tracks_production_context_contracts():
     coverage = (root / "docs" / "official-sdk-coverage.md").read_text(encoding="utf-8")
     readme = (root / "README.md").read_text(encoding="utf-8")
 
-    assert "Total: 61 typed tools" in coverage
-    for contract in ("set_active_clip", "update_clip_timing", "update_character_qa_status"):
+    assert "Total: 66 typed tools" in coverage
+    for contract in (
+        "set_active_clip",
+        "update_clip_timing",
+        "update_character_qa_status",
+        "LabelingSetup",
+        "RigidBody",
+        "VideoCamera",
+    ):
         assert contract in coverage
     assert "read-back verification and rollback" in readme
 

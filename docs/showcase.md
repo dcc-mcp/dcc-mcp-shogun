@@ -13,7 +13,8 @@ studio capture data, installation paths, machine names, or credentials.
 6. Probe the host's file-operation capability with the anonymous BVH through
    the typed `shogun-files` Skill.
 7. Probe the official `Scene`, `Timeline`, and `Offline` interfaces through
-   their typed Skills without running UI fallback.
+   their typed Skills without running UI fallback, including setup, rigid-body,
+   and video-camera inventory contracts.
 8. On a disposable recovery copy, probe the official channel-key and filtering
    contracts through `shogun-editing`, then re-inspect the affected sample.
 9. Inspect bounded Clip timing and Character QA state through the read-only
@@ -56,10 +57,13 @@ not included.
 - import, save, and export implementations use only the official SDK and return
   path-redacted result metadata, but are not presented as live-supported on
   that host build;
-- Shogun Post 1.19 rejects the official `Scene`, `Timeline`, and `Offline`
-  interface commands as invalid for that host application; typed calls return
-  bounded errors, so support is not overclaimed and no processing mutation is
-  attempted;
+- a wheel-installed adapter registers all 27 `shogun-scene` tools; the blank
+  1.19 host completes scene-object, rigid-body, and video-camera inventories,
+  while missing-object detail probes return bounded `ControlError` results and
+  leave the exact host available;
+- Shogun Post 1.19 rejects the official `Timeline` and `Offline` interface
+  commands as invalid for that host application; typed calls return bounded
+  errors, so support is not overclaimed and no processing mutation is attempted;
 - channel editing and filtering expose only allowlisted official SDK calls;
   `DeleteAllKeys`, arbitrary HSL, arbitrary Python, and bulk trajectory writes
   remain unavailable;
