@@ -765,6 +765,204 @@ def get_clip_timing(object_path: str) -> Dict[str, Any]:
     return _clip_summary(value)
 
 
+def _clip_by_name(scene: Any, clip_name: str) -> Any:
+    name = _bounded_text(clip_name, label="clip_name", maximum=512)
+    matches = [
+        value
+        for value in scene.Objects.FilterByType("Clip")
+        if _bounded_sdk_text(value.Name) == name
+    ]
+    if not matches:
+        raise ValueError("clip_name was not found")
+    if len(matches) > 1:
+        raise ValueError("clip_name is ambiguous")
+    return matches[0]
+
+
+def get_active_clip() -> Dict[str, Any]:
+    """Read the official active Clip name without returning scene paths."""
+    active_clip = _bounded_sdk_text(official_interface("Scene").ActiveClip)
+    return {"active_clip": active_clip, "has_active_clip": bool(active_clip)}
+
+
+def set_active_clip(clip_name: str) -> Dict[str, Any]:
+    """Select one existing Clip by exact name and verify the vendor read-back."""
+    scene = official_interface("Scene")
+    value = _clip_by_name(scene, clip_name)
+    requested = _bounded_sdk_text(value.Name)
+    previous = _bounded_sdk_text(scene.ActiveClip)
+    try:
+        scene.ActiveClip = requested
+        current = _bounded_sdk_text(scene.ActiveClip)
+        if current != requested:
+            raise RuntimeError("Shogun did not activate the requested clip")
+    except Exception:
+        try:
+            scene.ActiveClip = previous
+        except Exception:
+            pass
+        raise
+    return {"previous_active_clip": previous, "active_clip": current}
+
+
+def _clip_update_state(value: Any) -> Dict[str, Any]:
+    return {
+        "locked": bool(value.Locked),
+        "start_frame": _bounded_float(
+            value.Start_Frame,
+            label="start_frame",
+            minimum=-1_000_000_000.0,
+            maximum=1_000_000_000.0,
+        ),
+        "clip_offset": _bounded_float(
+            value.Clip_Offset,
+            label="clip_offset",
+            minimum=-1_000_000_000.0,
+            maximum=1_000_000_000.0,
+        ),
+        "duration": _bounded_float(
+            value.Duration,
+            label="duration",
+            minimum=0.0,
+            maximum=1_000_000_000.0,
+        ),
+        "time_scale": _bounded_float(
+            value.Time_Scale,
+            label="time_scale",
+            minimum=0.001,
+            maximum=1000.0,
+        ),
+        "smpte_align_clip": bool(value.SMPTE_Align_Clip),
+    }
+
+
+def _sdk_values_equal(current: Any, requested: Any) -> bool:
+    if isinstance(requested, float):
+        return math.isclose(float(current), requested, rel_tol=1e-9, abs_tol=1e-9)
+    return current == requested
+
+
+def _transactional_property_update(
+    value: Any,
+    *,
+    requested: Dict[str, Any],
+    properties: Dict[str, str],
+    previous: Dict[str, Any],
+    read_current: Any,
+) -> Dict[str, Any]:
+    changed: List[str] = []
+    try:
+        for key, property_name in properties.items():
+            if requested[key] is not None:
+                changed.append(key)
+                setattr(value, property_name, requested[key])
+        current = read_current(value)
+        if any(
+            requested[key] is not None and not _sdk_values_equal(current[key], requested[key])
+            for key in properties
+        ):
+            raise RuntimeError("Shogun did not return the requested property values")
+    except Exception:
+        for key in reversed(changed):
+            try:
+                setattr(value, properties[key], previous[key])
+            except Exception:
+                pass
+        raise
+    return current
+
+
+def update_clip_timing(
+    object_path: str,
+    *,
+    locked: Any = None,
+    start_frame: Any = None,
+    clip_offset: Any = None,
+    duration: Any = None,
+    time_scale: Any = None,
+    smpte_align_clip: Any = None,
+) -> Dict[str, Any]:
+    """Update an allowlisted Clip timing subset with verification and rollback."""
+    if all(
+        value is None
+        for value in (
+            locked,
+            start_frame,
+            clip_offset,
+            duration,
+            time_scale,
+            smpte_align_clip,
+        )
+    ):
+        raise ValueError("at least one clip timing property is required")
+    requested = {
+        "locked": _validated_bool(locked) if locked is not None else None,
+        "start_frame": (
+            _bounded_float(
+                start_frame,
+                label="start_frame",
+                minimum=-1_000_000_000.0,
+                maximum=1_000_000_000.0,
+            )
+            if start_frame is not None
+            else None
+        ),
+        "clip_offset": (
+            _bounded_float(
+                clip_offset,
+                label="clip_offset",
+                minimum=-1_000_000_000.0,
+                maximum=1_000_000_000.0,
+            )
+            if clip_offset is not None
+            else None
+        ),
+        "duration": (
+            _bounded_float(
+                duration,
+                label="duration",
+                minimum=0.0,
+                maximum=1_000_000_000.0,
+            )
+            if duration is not None
+            else None
+        ),
+        "time_scale": (
+            _bounded_float(
+                time_scale,
+                label="time_scale",
+                minimum=0.001,
+                maximum=1000.0,
+            )
+            if time_scale is not None
+            else None
+        ),
+        "smpte_align_clip": (
+            _validated_bool(smpte_align_clip) if smpte_align_clip is not None else None
+        ),
+    }
+    properties = {
+        "locked": "Locked",
+        "start_frame": "Start_Frame",
+        "clip_offset": "Clip_Offset",
+        "duration": "Duration",
+        "time_scale": "Time_Scale",
+        "smpte_align_clip": "SMPTE_Align_Clip",
+    }
+    value = _scene_object(official_interface("Scene"), object_path)
+    if str(value.Type) != "Clip":
+        raise ValueError("scene object is not a Clip")
+    previous = _clip_update_state(value)
+    current = _transactional_property_update(
+        value,
+        requested=requested,
+        properties=properties,
+        previous=previous,
+        read_current=_clip_update_state,
+    )
+    return {"clip": _object_summary(value), "previous": previous, "current": current}
+
+
 def _character_status(value: Any) -> Dict[str, Any]:
     return {
         "name": _bounded_sdk_text(value.Name),
@@ -805,6 +1003,63 @@ def get_character_status(object_path: str) -> Dict[str, Any]:
     if str(value.Type) != "Character":
         raise ValueError("scene object is not a Character")
     return _character_status(value)
+
+
+def _character_qa_state(value: Any) -> Dict[str, Any]:
+    return {
+        "active": bool(value.Active),
+        "shot_labeled": bool(value.Shot_Labeled),
+        "shot_edited": bool(value.Shot_Edited),
+        "shot_approved": bool(value.Shot_Approved),
+        "shot_attached": bool(value.Shot_Attached),
+        "special_flag": bool(value.Special_Flag),
+    }
+
+
+def update_character_qa_status(
+    object_path: str,
+    *,
+    active: Any = None,
+    shot_labeled: Any = None,
+    shot_edited: Any = None,
+    shot_approved: Any = None,
+    shot_attached: Any = None,
+    special_flag: Any = None,
+) -> Dict[str, Any]:
+    """Update only allowlisted Character QA booleans with rollback on failure."""
+    raw = {
+        "active": active,
+        "shot_labeled": shot_labeled,
+        "shot_edited": shot_edited,
+        "shot_approved": shot_approved,
+        "shot_attached": shot_attached,
+        "special_flag": special_flag,
+    }
+    if all(value is None for value in raw.values()):
+        raise ValueError("at least one character QA property is required")
+    requested = {
+        key: _validated_bool(value) if value is not None else None for key, value in raw.items()
+    }
+    properties = {
+        "active": "Active",
+        "shot_labeled": "Shot_Labeled",
+        "shot_edited": "Shot_Edited",
+        "shot_approved": "Shot_Approved",
+        "shot_attached": "Shot_Attached",
+        "special_flag": "Special_Flag",
+    }
+    value = _scene_object(official_interface("Scene"), object_path)
+    if str(value.Type) != "Character":
+        raise ValueError("scene object is not a Character")
+    previous = _character_qa_state(value)
+    current = _transactional_property_update(
+        value,
+        requested=requested,
+        properties=properties,
+        previous=previous,
+        read_current=_character_qa_state,
+    )
+    return {"character": _object_summary(value), "previous": previous, "current": current}
 
 
 def list_optical_cameras(max_cameras: int = 500) -> Dict[str, Any]:

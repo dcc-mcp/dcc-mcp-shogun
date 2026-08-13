@@ -1,10 +1,10 @@
 ---
 name: shogun-production-context
 description: >-
-  Inspect bounded Vicon Shogun Post clip timing and character QA state through
-  the official Scene, Clip, and Character SDK contracts. Use for NLE timing,
-  SMPTE alignment, and shot status. Artist identities and free-form notes are
-  excluded.
+  Inspect bounded Vicon Shogun Post clip timing and character QA state, select
+  one existing active Clip, or apply allowlisted timing and QA updates through
+  the official Scene, Clip, and Character SDK contracts. Artist identities and
+  free-form notes are excluded.
 license: MIT
 metadata:
   dcc-mcp:
@@ -14,19 +14,23 @@ metadata:
     version: "0.6.0" # x-release-please-version
     tags: [motion-capture, animation, vicon, clips, qa]
     search-hint: >-
-      Vicon Shogun Post clips NLE timing SMPTE character shot QA status
+      Vicon Shogun Post clips active clip NLE timing SMPTE character shot QA
+      status verified rollback
     tools: tools.yaml
 ---
 
 # Vicon Shogun Post Production Context
 
-Use these read-only tools to orient a mocap workflow before changing clip timing
-or updating QA metadata. They call only Vicon's official Scene, Clip, and
-Character SDK contracts.
+Start with the read-only inventory tools to orient a mocap workflow. The four
+mutation tools call only Vicon's official Scene, Clip, and Character SDK
+contracts, accept narrow typed fields, verify the vendor read-back, and attempt
+rollback after a partial failure.
 
 Character results contain bounded workflow state only. Artist identities, user
 names, final character names, trial notes, production
 notes, special-flag notes, and generic notes are never read or returned.
 
-The Skill does not access the Eclipse database, activate clips, change clip
-timing, or write character metadata.
+The Skill does not access the Eclipse database, create/remove/rename Clip
+objects, expose generic attribute writes, or read/write artist identities and
+free-form notes. Mutations remain capability-gated until validated against a
+disposable non-empty scene for the selected host build.
