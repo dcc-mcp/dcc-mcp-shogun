@@ -99,3 +99,77 @@ def test_official_filter_types_are_connected_and_allowlisted(monkeypatch):
 
     with pytest.raises(sdk.ShogunSdkError, match="not an enabled SDK type"):
         sdk.official_type("ArbitraryFilter")
+
+
+def test_candidate_ports_prefer_documented_range(monkeypatch):
+    monkeypatch.delenv(sdk.CONTROL_PORT_ENV, raising=False)
+    monkeypatch.setattr(sdk, "listening_ports", lambda _pid: [49152, 850, 804])
+    assert sdk.candidate_control_ports(42) == [804, 850, 49152]
+
+
+def test_candidate_ports_keep_unusual_listeners(monkeypatch):
+    monkeypatch.delenv(sdk.CONTROL_PORT_ENV, raising=False)
+    monkeypatch.setattr(sdk, "listening_ports", lambda _pid: [52800])
+    assert sdk.candidate_control_ports(42) == [52800]
+
+
+def test_wait_for_control_port_validates_candidates(monkeypatch):
+    monkeypatch.delenv(sdk.CONTROL_PORT_ENV, raising=False)
+    # 804 ranks first (documented range) but fails validation; 52800 is the
+    # actual control stream and must be reached through the fallback.
+    monkeypatch.setattr(sdk, "listening_ports", lambda _pid: [804, 52800])
+    monkeypatch.setattr(sdk, "_pid_alive", lambda _pid: True)
+    tried = []
+
+    def fake_validator(port):
+        tried.append(port)
+        return object() if port == 52800 else None
+
+    assert sdk.wait_for_control_port(42, timeout=5, interval=0.0, validator=fake_validator) == 52800
+    assert tried == [804, 52800]
+
+
+def test_wait_for_control_port_waits_for_late_listener(monkeypatch):
+    snapshots = iter([[], [], [803]])
+    monkeypatch.delenv(sdk.CONTROL_PORT_ENV, raising=False)
+    monkeypatch.setattr(sdk, "listening_ports", lambda _pid: next(snapshots))
+    monkeypatch.setattr(sdk, "_pid_alive", lambda _pid: True)
+    assert (
+        sdk.wait_for_control_port(42, timeout=5, interval=0.0, validator=lambda p: object()) == 803
+    )
+
+
+def test_wait_for_control_port_times_out(monkeypatch):
+    monkeypatch.delenv(sdk.CONTROL_PORT_ENV, raising=False)
+    monkeypatch.setattr(sdk, "listening_ports", lambda _pid: [])
+    monkeypatch.setattr(sdk, "_pid_alive", lambda _pid: True)
+    with pytest.raises(sdk.ShogunSdkError, match="did not open"):
+        sdk.wait_for_control_port(42, timeout=0.0, interval=0.0, validator=lambda p: object())
+
+
+def test_wait_for_control_port_stops_when_host_exits(monkeypatch):
+    monkeypatch.delenv(sdk.CONTROL_PORT_ENV, raising=False)
+    monkeypatch.setattr(sdk, "listening_ports", lambda _pid: [])
+    monkeypatch.setattr(sdk, "_pid_alive", lambda _pid: False)
+    with pytest.raises(sdk.ShogunSdkError, match="exited before"):
+        sdk.wait_for_control_port(42, timeout=30, interval=0.0, validator=lambda p: object())
+
+
+def test_wait_for_control_port_env_override_is_validated(monkeypatch):
+    monkeypatch.setenv(sdk.CONTROL_PORT_ENV, "803")
+    monkeypatch.setattr(sdk, "listening_ports", lambda _pid: [803])
+    monkeypatch.setattr(sdk, "_pid_alive", lambda _pid: True)
+    assert (
+        sdk.wait_for_control_port(42, timeout=5, interval=0.0, validator=lambda p: object()) == 803
+    )
+
+
+def test_control_port_timeout_env_is_bounded(monkeypatch):
+    monkeypatch.setenv(sdk.CONTROL_PORT_TIMEOUT_ENV, "not-a-number")
+    with pytest.raises(sdk.ShogunSdkError, match="must be a number of seconds"):
+        sdk._control_port_timeout()
+    monkeypatch.setenv(sdk.CONTROL_PORT_TIMEOUT_ENV, "0")
+    with pytest.raises(sdk.ShogunSdkError, match="must be positive"):
+        sdk._control_port_timeout()
+    monkeypatch.setenv(sdk.CONTROL_PORT_TIMEOUT_ENV, "42")
+    assert sdk._control_port_timeout() == 42.0
