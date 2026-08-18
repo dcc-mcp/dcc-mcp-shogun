@@ -152,12 +152,14 @@ directory. The adapter resolves the selected host process's control-stream
 listener; `DCC_MCP_SHOGUN_CONTROL_PORT` may override it only when that port is
 owned by the same host process.
 
-Shogun Post opens its control-stream listener late in startup (Vicon's
-documented default range is 803-899, with later instances incrementing the
-port). The adapter therefore waits for the host process to open a listener and
-confirms each candidate with a real SDK handshake before serving, which also
-tolerates custom or randomly assigned control ports. The wait defaults to 120
-seconds and can be tuned with `DCC_MCP_SHOGUN_CONTROL_PORT_TIMEOUT` (seconds).
+Shogun Post opens its control-stream listener late in startup. Vicon documents
+803 as the default port; additional local instances search incrementally upward,
+and operators can configure a fixed port. The adapter therefore waits for the
+selected host process to open a listener in its bounded 803-899 discovery window
+and confirms candidates with a real SDK handshake before serving. It never
+binds or changes Shogun's port. For a fixed port outside that discovery window,
+set `DCC_MCP_SHOGUN_CONTROL_PORT` explicitly. The wait defaults to 120 seconds
+and can be tuned with `DCC_MCP_SHOGUN_CONTROL_PORT_TIMEOUT` (seconds).
 
 The DCC-MCP listener uses an OS-assigned loopback port unless `--mcp-port` or
 `DCC_MCP_SHOGUN_PORT` is explicitly set. Use `dcc-mcp-cli list`, `search`,
