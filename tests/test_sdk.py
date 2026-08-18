@@ -101,32 +101,36 @@ def test_official_filter_types_are_connected_and_allowlisted(monkeypatch):
         sdk.official_type("ArbitraryFilter")
 
 
-def test_candidate_ports_prefer_documented_range(monkeypatch):
+def test_candidate_ports_keep_only_bounded_default_window(monkeypatch):
     monkeypatch.delenv(sdk.CONTROL_PORT_ENV, raising=False)
     monkeypatch.setattr(sdk, "listening_ports", lambda _pid: [49152, 850, 804])
-    assert sdk.candidate_control_ports(42) == [804, 850, 49152]
+    assert sdk.candidate_control_ports(42) == [804, 850]
 
 
-def test_candidate_ports_keep_unusual_listeners(monkeypatch):
+def test_candidate_ports_exclude_unrelated_shogun_listeners(monkeypatch):
     monkeypatch.delenv(sdk.CONTROL_PORT_ENV, raising=False)
     monkeypatch.setattr(sdk, "listening_ports", lambda _pid: [52800])
-    assert sdk.candidate_control_ports(42) == [52800]
+    assert sdk.candidate_control_ports(42) == []
+
+
+def test_candidate_ports_allow_explicit_custom_listener(monkeypatch):
+    monkeypatch.setenv(sdk.CONTROL_PORT_ENV, "49152")
+    monkeypatch.setattr(sdk, "listening_ports", lambda _pid: [49152, 52800])
+    assert sdk.candidate_control_ports(42) == [49152]
 
 
 def test_wait_for_control_port_validates_candidates(monkeypatch):
     monkeypatch.delenv(sdk.CONTROL_PORT_ENV, raising=False)
-    # 804 ranks first (documented range) but fails validation; 52800 is the
-    # actual control stream and must be reached through the fallback.
-    monkeypatch.setattr(sdk, "listening_ports", lambda _pid: [804, 52800])
+    monkeypatch.setattr(sdk, "listening_ports", lambda _pid: [804, 805, 52800])
     monkeypatch.setattr(sdk, "_pid_alive", lambda _pid: True)
     tried = []
 
     def fake_validator(port):
         tried.append(port)
-        return object() if port == 52800 else None
+        return object() if port == 805 else None
 
-    assert sdk.wait_for_control_port(42, timeout=5, interval=0.0, validator=fake_validator) == 52800
-    assert tried == [804, 52800]
+    assert sdk.wait_for_control_port(42, timeout=5, interval=0.0, validator=fake_validator) == 805
+    assert tried == [804, 805]
 
 
 def test_wait_for_control_port_waits_for_late_listener(monkeypatch):
@@ -137,6 +141,23 @@ def test_wait_for_control_port_waits_for_late_listener(monkeypatch):
     assert (
         sdk.wait_for_control_port(42, timeout=5, interval=0.0, validator=lambda p: object()) == 803
     )
+
+
+def test_wait_for_control_port_retries_listener_until_protocol_is_ready(monkeypatch):
+    monkeypatch.delenv(sdk.CONTROL_PORT_ENV, raising=False)
+    monkeypatch.setattr(sdk, "listening_ports", lambda _pid: [803])
+    monkeypatch.setattr(sdk, "_pid_alive", lambda _pid: True)
+    clock = [0.0]
+    monkeypatch.setattr(sdk.time, "time", lambda: clock[0])
+    monkeypatch.setattr(sdk.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    attempts = []
+
+    def fake_validator(port):
+        attempts.append(port)
+        return object() if len(attempts) == 2 else None
+
+    assert sdk.wait_for_control_port(42, timeout=5, interval=1, validator=fake_validator) == 803
+    assert attempts == [803, 803]
 
 
 def test_wait_for_control_port_times_out(monkeypatch):
@@ -161,6 +182,18 @@ def test_wait_for_control_port_env_override_is_validated(monkeypatch):
     monkeypatch.setattr(sdk, "_pid_alive", lambda _pid: True)
     assert (
         sdk.wait_for_control_port(42, timeout=5, interval=0.0, validator=lambda p: object()) == 803
+    )
+
+
+def test_wait_for_control_port_env_override_waits_until_owned(monkeypatch):
+    snapshots = iter([[52800], [49152, 52800]])
+    monkeypatch.setenv(sdk.CONTROL_PORT_ENV, "49152")
+    monkeypatch.setattr(sdk, "listening_ports", lambda _pid: next(snapshots))
+    monkeypatch.setattr(sdk, "_pid_alive", lambda _pid: True)
+
+    assert (
+        sdk.wait_for_control_port(42, timeout=5, interval=0.0, validator=lambda p: object())
+        == 49152
     )
 
 
