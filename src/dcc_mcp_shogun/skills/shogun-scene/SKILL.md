@@ -12,7 +12,7 @@ metadata:
     dcc: shogun
     layer: domain
     compatibility: "Python 3.9+; Vicon Shogun Post with the official local SDK"
-    version: "0.8.1" # x-release-please-version
+    version: "0.8.2" # x-release-please-version
     tags: [motion-capture, animation, vicon, scene]
     search-hint: >-
       Vicon Shogun Post mocap scene subjects markers skeleton bones trajectory

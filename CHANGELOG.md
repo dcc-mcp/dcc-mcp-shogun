@@ -11,6 +11,14 @@
 - Add ROM labeling, subject calibration, QuickPost, and expanded processing
   settings from the official `Offline` interface.
 
+## [0.8.2](https://github.com/dcc-mcp/dcc-mcp-shogun/compare/v0.8.1...v0.8.2) (2026-08-18)
+
+
+### Bug Fixes
+
+* harden Shogun control-stream startup ([a537562](https://github.com/dcc-mcp/dcc-mcp-shogun/commit/a537562c31ed98d2c26eb7341f3d55c6c9658051))
+* **sdk:** wait for the Shogun control stream and validate it with the SDK ([#18](https://github.com/dcc-mcp/dcc-mcp-shogun/issues/18)) ([dd22206](https://github.com/dcc-mcp/dcc-mcp-shogun/commit/dd22206a006c05a7ec570cd9ffc7ea3aa079c923))
+
 ## [0.8.1](https://github.com/dcc-mcp/dcc-mcp-shogun/compare/v0.8.0...v0.8.1) (2026-08-13)
 
 
