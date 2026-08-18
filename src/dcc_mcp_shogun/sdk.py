@@ -4,17 +4,22 @@ from __future__ import annotations
 
 import ctypes
 import importlib
+import logging
 import os
 import socket
 import sys
+import time
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any, Optional
 
 SDK_ENV = "DCC_MCP_SHOGUN_SDK_PATH"
 CONTROL_PORT_ENV = "DCC_MCP_SHOGUN_CONTROL_PORT"
+CONTROL_PORT_TIMEOUT_ENV = "DCC_MCP_SHOGUN_CONTROL_PORT_TIMEOUT"
 DEFAULT_CONTROL_PORT = 803
 CONTROL_PORT_MAX = 899
+DEFAULT_CONTROL_PORT_TIMEOUT_SECONDS = 120.0
+CONTROL_PORT_POLL_SECONDS = 1.0
 _configured_control_port: Optional[int] = None
 _interface_connection: Any = None
 _INTERFACE_CLASSES = {"Offline", "Scene", "Timeline"}
@@ -22,6 +27,8 @@ _SDK_TYPES = {
     "FIRFilter": ("Filter", "FIRFilter"),
     "WeightedAverageFilter": ("Filter", "WeightedAverageFilter"),
 }
+
+logger = logging.getLogger(__name__)
 
 
 class _TcpRowOwnerPid(ctypes.Structure):
@@ -204,8 +211,13 @@ def _validated_port(raw: str) -> int:
     return port
 
 
-def resolve_control_port(host_pid: int) -> int:
-    """Resolve the control stream owned by the selected Shogun Post process."""
+def candidate_control_ports(host_pid: int) -> list[int]:
+    """Rank the listener ports the selected Shogun host could be using.
+
+    Vicon's documented control-stream range (803..899) is preferred, but any
+    other listener owned by the host process remains a candidate so custom or
+    randomly assigned control ports can still be discovered and validated.
+    """
     owned_ports = listening_ports(host_pid)
     configured = os.environ.get(CONTROL_PORT_ENV)
     if configured is not None:
@@ -214,21 +226,131 @@ def resolve_control_port(host_pid: int) -> int:
             raise ShogunSdkError(
                 f"{CONTROL_PORT_ENV} does not belong to the selected Shogun host process"
             )
-        return port
+        return [port]
 
-    candidates = [port for port in owned_ports if DEFAULT_CONTROL_PORT <= port <= CONTROL_PORT_MAX]
-    if len(candidates) == 1:
-        return candidates[0]
+    in_range = sorted(
+        port for port in owned_ports if DEFAULT_CONTROL_PORT <= port <= CONTROL_PORT_MAX
+    )
+    others = sorted(port for port in owned_ports if port not in in_range)
+    return in_range + others
+
+
+def resolve_control_port(host_pid: int) -> int:
+    """Resolve the best control-port candidate from one listener snapshot."""
+    candidates = candidate_control_ports(host_pid)
     if not candidates:
         raise ShogunSdkError(
             "The selected Shogun host does not own a control-stream listener in the expected range"
         )
-    raise ShogunSdkError("The selected Shogun host owns multiple possible control-stream listeners")
+    return candidates[0]
+
+
+def validate_control_port(port: int) -> Optional[Any]:
+    """Return a connected SDK client when the port answers the control protocol."""
+    try:
+        from vicon_shogun_post import ViconShogunPost
+    except ImportError:
+        return None
+    try:
+        client = ViconShogunPost("localhost", port)
+        client.GetFrameCount()
+        return client
+    except Exception:
+        return None
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return False
+        return True
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return False
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == 258
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _control_port_timeout() -> float:
+    raw = os.environ.get(CONTROL_PORT_TIMEOUT_ENV)
+    if raw is None:
+        return DEFAULT_CONTROL_PORT_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise ShogunSdkError(f"{CONTROL_PORT_TIMEOUT_ENV} must be a number of seconds") from error
+    if value <= 0:
+        raise ShogunSdkError(f"{CONTROL_PORT_TIMEOUT_ENV} must be positive")
+    return value
+
+
+def wait_for_control_port(
+    host_pid: int,
+    timeout: Optional[float] = None,
+    interval: float = CONTROL_PORT_POLL_SECONDS,
+    validator: Optional[Any] = validate_control_port,
+) -> int:
+    """Wait until the Shogun host answers its control stream, then return the port.
+
+    Shogun Post opens its control-stream listener late in startup, so a single
+    listener snapshot taken right after process launch usually misses it. This
+    function polls the host's owned listeners until a candidate answers the
+    official SDK handshake, which also keeps custom or randomly assigned
+    control ports working.
+
+    Args:
+        host_pid: Windows process id of the Shogun Post host.
+        timeout: Maximum seconds to wait; defaults to the
+            DCC_MCP_SHOGUN_CONTROL_PORT_TIMEOUT environment variable or
+            DEFAULT_CONTROL_PORT_TIMEOUT_SECONDS.
+        interval: Seconds between listener snapshots.
+        validator: Callable that maps a port to a connected client or None,
+            used to confirm a candidate port speaks the control protocol.
+
+    Returns:
+        The validated control-stream port.
+    """
+    deadline = time.time() + (_control_port_timeout() if timeout is None else timeout)
+    seen: set[int] = set()
+    while True:
+        candidates = candidate_control_ports(host_pid)
+        for port in candidates:
+            if port in seen:
+                continue
+            seen.add(port)
+            if validator is not None:
+                try:
+                    client = validator(port)
+                except Exception:
+                    client = None
+                if client is None:
+                    logger.debug("Port %s did not answer the control protocol", port)
+                    continue
+            logger.info("Shogun Post control stream resolved on port %s", port)
+            return port
+        if not _pid_alive(host_pid):
+            raise ShogunSdkError(
+                "The Shogun Post host process exited before its control stream appeared"
+            )
+        if time.time() >= deadline:
+            details = ", ".join(str(port) for port in sorted(seen)) or "none"
+            raise ShogunSdkError(
+                "The Shogun Post host did not open a control-stream listener in time "
+                f"(candidates seen: {details})"
+            )
+        time.sleep(interval)
 
 
 def configure_control_port(host_pid: int) -> int:
     global _configured_control_port
-    _configured_control_port = resolve_control_port(host_pid)
+    _configured_control_port = wait_for_control_port(host_pid)
     return _configured_control_port
 
 
