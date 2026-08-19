@@ -11,7 +11,7 @@ metadata:
     dcc: shogun
     layer: domain
     compatibility: "Python 3.9+; Vicon Shogun Post with the official local SDK"
-    version: "0.8.3" # x-release-please-version
+    version: "0.8.4" # x-release-please-version
     tags: [motion-capture, animation, vicon, pipeline, destructive]
     search-hint: >-
       Vicon Shogun Post import BVH C3D MCP motion save VDF export FBX typed file

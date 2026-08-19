@@ -11,7 +11,7 @@ metadata:
     dcc: shogun
     layer: domain
     compatibility: "Python 3.9+; capability-gated Vicon Shogun Post Timeline SDK"
-    version: "0.8.3" # x-release-please-version
+    version: "0.8.4" # x-release-please-version
     tags: [motion-capture, animation, vicon, timeline]
     search-hint: >-
       Vicon Shogun Post timeline current frame play range selected time ranges
