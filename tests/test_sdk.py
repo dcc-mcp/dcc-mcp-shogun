@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import types
 from pathlib import Path
@@ -7,6 +8,10 @@ from pathlib import Path
 import pytest
 
 from dcc_mcp_shogun import sdk
+
+
+def test_process_probe_observes_current_process():
+    assert sdk.process_is_alive(os.getpid()) is True
 
 
 def _fake_sdk(root: Path) -> Path:
@@ -122,7 +127,7 @@ def test_candidate_ports_allow_explicit_custom_listener(monkeypatch):
 def test_wait_for_control_port_validates_candidates(monkeypatch):
     monkeypatch.delenv(sdk.CONTROL_PORT_ENV, raising=False)
     monkeypatch.setattr(sdk, "listening_ports", lambda _pid: [804, 805, 52800])
-    monkeypatch.setattr(sdk, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(sdk, "process_is_alive", lambda _pid: True)
     tried = []
 
     def fake_validator(port):
@@ -137,7 +142,7 @@ def test_wait_for_control_port_waits_for_late_listener(monkeypatch):
     snapshots = iter([[], [], [803]])
     monkeypatch.delenv(sdk.CONTROL_PORT_ENV, raising=False)
     monkeypatch.setattr(sdk, "listening_ports", lambda _pid: next(snapshots))
-    monkeypatch.setattr(sdk, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(sdk, "process_is_alive", lambda _pid: True)
     assert (
         sdk.wait_for_control_port(42, timeout=5, interval=0.0, validator=lambda p: object()) == 803
     )
@@ -146,7 +151,7 @@ def test_wait_for_control_port_waits_for_late_listener(monkeypatch):
 def test_wait_for_control_port_retries_listener_until_protocol_is_ready(monkeypatch):
     monkeypatch.delenv(sdk.CONTROL_PORT_ENV, raising=False)
     monkeypatch.setattr(sdk, "listening_ports", lambda _pid: [803])
-    monkeypatch.setattr(sdk, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(sdk, "process_is_alive", lambda _pid: True)
     clock = [0.0]
     monkeypatch.setattr(sdk.time, "time", lambda: clock[0])
     monkeypatch.setattr(sdk.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
@@ -163,15 +168,25 @@ def test_wait_for_control_port_retries_listener_until_protocol_is_ready(monkeypa
 def test_wait_for_control_port_times_out(monkeypatch):
     monkeypatch.delenv(sdk.CONTROL_PORT_ENV, raising=False)
     monkeypatch.setattr(sdk, "listening_ports", lambda _pid: [])
-    monkeypatch.setattr(sdk, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(sdk, "process_is_alive", lambda _pid: True)
     with pytest.raises(sdk.ShogunSdkError, match="did not open"):
         sdk.wait_for_control_port(42, timeout=0.0, interval=0.0, validator=lambda p: object())
+
+
+def test_wait_for_control_port_does_not_misreport_live_host_as_exited(monkeypatch):
+    monkeypatch.delenv(sdk.CONTROL_PORT_ENV, raising=False)
+    monkeypatch.setattr(sdk, "listening_ports", lambda _pid: [])
+
+    with pytest.raises(sdk.ShogunSdkError, match="did not open"):
+        sdk.wait_for_control_port(
+            os.getpid(), timeout=0.0, interval=0.0, validator=lambda _port: object()
+        )
 
 
 def test_wait_for_control_port_stops_when_host_exits(monkeypatch):
     monkeypatch.delenv(sdk.CONTROL_PORT_ENV, raising=False)
     monkeypatch.setattr(sdk, "listening_ports", lambda _pid: [])
-    monkeypatch.setattr(sdk, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(sdk, "process_is_alive", lambda _pid: False)
     with pytest.raises(sdk.ShogunSdkError, match="exited before"):
         sdk.wait_for_control_port(42, timeout=30, interval=0.0, validator=lambda p: object())
 
@@ -179,7 +194,7 @@ def test_wait_for_control_port_stops_when_host_exits(monkeypatch):
 def test_wait_for_control_port_env_override_is_validated(monkeypatch):
     monkeypatch.setenv(sdk.CONTROL_PORT_ENV, "803")
     monkeypatch.setattr(sdk, "listening_ports", lambda _pid: [803])
-    monkeypatch.setattr(sdk, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(sdk, "process_is_alive", lambda _pid: True)
     assert (
         sdk.wait_for_control_port(42, timeout=5, interval=0.0, validator=lambda p: object()) == 803
     )
@@ -189,7 +204,7 @@ def test_wait_for_control_port_env_override_waits_until_owned(monkeypatch):
     snapshots = iter([[52800], [49152, 52800]])
     monkeypatch.setenv(sdk.CONTROL_PORT_ENV, "49152")
     monkeypatch.setattr(sdk, "listening_ports", lambda _pid: next(snapshots))
-    monkeypatch.setattr(sdk, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(sdk, "process_is_alive", lambda _pid: True)
 
     assert (
         sdk.wait_for_control_port(42, timeout=5, interval=0.0, validator=lambda p: object())

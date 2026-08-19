@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 from dcc_mcp_shogun import __version__
-from dcc_mcp_shogun.server import ShogunMcpServer, _parse_args, _process_is_alive
+from dcc_mcp_shogun.server import ShogunMcpServer, _parse_args
 
 
 def test_version_metadata_is_synchronized():
@@ -214,7 +214,3 @@ def test_server_options_bind_the_real_host_pid(monkeypatch, tmp_path):
 def test_cli_requires_explicit_host_pid():
     options = _parse_args(["--host-pid", "123"])
     assert options.host_pid == 123
-
-
-def test_process_probe_observes_current_process():
-    assert _process_is_alive(os.getpid()) is True
