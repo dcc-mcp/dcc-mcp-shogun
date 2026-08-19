@@ -20,6 +20,11 @@ DEFAULT_CONTROL_PORT = 803
 DEFAULT_CONTROL_PORT_DISCOVERY_END = 899
 DEFAULT_CONTROL_PORT_TIMEOUT_SECONDS = 120.0
 CONTROL_PORT_POLL_SECONDS = 1.0
+_PROCESS_SYNCHRONIZE = 0x00100000
+_ERROR_ACCESS_DENIED = 5
+_WAIT_OBJECT_0 = 0
+_WAIT_TIMEOUT = 258
+_WAIT_FAILED = 0xFFFFFFFF
 _configured_control_port: Optional[int] = None
 _interface_connection: Any = None
 _INTERFACE_CLASSES = {"Offline", "Scene", "Timeline"}
@@ -260,21 +265,45 @@ def validate_control_port(port: int) -> Optional[Any]:
         return None
 
 
-def _pid_alive(pid: int) -> bool:
+def process_is_alive(pid: int) -> bool:
+    """Return whether one explicit process is still running.
+
+    Windows wait handles require SYNCHRONIZE access. A query-only handle makes
+    WaitForSingleObject fail even while the target process is alive.
+    """
     if pid <= 0:
         return False
     if os.name != "nt":
         try:
             os.kill(pid, 0)
-        except (ProcessLookupError, PermissionError):
+        except ProcessLookupError:
             return False
+        except PermissionError:
+            return True
         return True
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    handle = kernel32.OpenProcess(0x1000, False, pid)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    handle = kernel32.OpenProcess(_PROCESS_SYNCHRONIZE, False, pid)
     if not handle:
-        return False
+        return ctypes.get_last_error() == _ERROR_ACCESS_DENIED
     try:
-        return kernel32.WaitForSingleObject(handle, 0) == 258
+        wait_result = kernel32.WaitForSingleObject(handle, 0)
+        if wait_result == _WAIT_TIMEOUT:
+            return True
+        if wait_result == _WAIT_OBJECT_0:
+            return False
+        if wait_result == _WAIT_FAILED:
+            error = ctypes.get_last_error()
+            if error == _ERROR_ACCESS_DENIED:
+                return True
+            raise ShogunSdkError(f"Unable to inspect Shogun host process: Windows error {error}")
+        raise ShogunSdkError(f"Unable to inspect Shogun host process: wait result {wait_result}")
     finally:
         kernel32.CloseHandle(handle)
 
@@ -334,7 +363,7 @@ def wait_for_control_port(
                     continue
             logger.info("Shogun Post control stream resolved on port %s", port)
             return port
-        if not _pid_alive(host_pid):
+        if not process_is_alive(host_pid):
             raise ShogunSdkError(
                 "The Shogun Post host process exited before its control stream appeared"
             )

@@ -21,6 +21,7 @@ from .sdk import (
     configure_sdk,
     connect_client,
     host_product_version,
+    process_is_alive,
     resolve_sdk_path,
 )
 from .state import bind_server, unbind_server
@@ -106,25 +107,6 @@ def stop_server() -> None:
         _server = None
 
 
-def _process_is_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    if os.name == "nt":
-        kernel32 = __import__("ctypes").WinDLL("kernel32", use_last_error=True)
-        handle = kernel32.OpenProcess(0x00100000, False, pid)
-        if not handle:
-            return __import__("ctypes").get_last_error() == 5
-        try:
-            return kernel32.WaitForSingleObject(handle, 0) == 258
-        finally:
-            kernel32.CloseHandle(handle)
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
-        return False
-    return True
-
-
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the Vicon Shogun Post DCC-MCP adapter.")
     parser.add_argument("--version", action="version", version=__version__)
@@ -147,7 +129,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     start_server(port=args.mcp_port, host_pid=args.host_pid, sdk_path=args.sdk_path)
     try:
         while not stopped.wait(1.0):
-            if not _process_is_alive(args.host_pid):
+            if not process_is_alive(args.host_pid):
                 break
     finally:
         stop_server()
