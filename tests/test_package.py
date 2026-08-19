@@ -123,6 +123,25 @@ def test_release_sources_are_synchronized_by_release_please():
         assert path in config
 
 
+def test_release_please_dispatches_package_publication():
+    root = Path(__file__).parents[1]
+    orchestrator = (root / ".github" / "workflows" / "release-please.yml").read_text(
+        encoding="utf-8"
+    )
+    publisher = (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+
+    assert "  actions: write" in orchestrator
+    assert "      - id: release" in orchestrator
+    assert "if: ${{ steps.release.outputs.release_created == 'true' }}" in orchestrator
+    assert "RELEASE_TAG: ${{ steps.release.outputs.tag_name }}" in orchestrator
+    assert (
+        'gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$RELEASE_TAG"'
+        in orchestrator
+    )
+    assert "  workflow_dispatch:" in publisher
+    assert "  release:" not in publisher
+
+
 def test_documentation_images_are_excluded_from_sdist():
     pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
     assert '"docs/**/*.png"' in pyproject
