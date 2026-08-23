@@ -26,7 +26,7 @@ and lifecycle data.
 | Python | 3.9+; 3.9 and 3.12 are CI-tested |
 | Vicon Shogun Post | 1.19+ |
 | DCC-MCP Core | `>=0.19.86,<1.0.0` |
-| Adapter | `0.9.0` <!-- x-release-please-version --> |
+| Adapter | `0.10.0` <!-- x-release-please-version --> |
 
 `doctor` and `verify` enforce the Python, Core, and Shogun floors. They report
 unsupported versions instead of attempting a best-effort connection.
@@ -67,7 +67,7 @@ The adapter never scans for another Shogun process or silently changes the PID.
 Install the released wheel into the Python environment that runs the adapter:
 
 ```powershell
-python -m pip install "dcc-mcp-shogun==0.9.0" # x-release-please-version
+python -m pip install "dcc-mcp-shogun==0.10.0" # x-release-please-version
 ```
 
 If the SDK is not installed beside the selected Shogun executable, provide its
