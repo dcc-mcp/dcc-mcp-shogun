@@ -14,8 +14,10 @@ inspection, timeline control, bounded cleanup, processing, and file workflows.
 The adapter uses Vicon's official local `ViconShogunPost` control-stream SDK and
 its `Scene`, `Timeline`, `Offline`, `Channel`, `FIRFilter`, and
 `WeightedAverageFilter` contracts. It does not expose arbitrary Python or HSL
-execution. Application controls not exposed by the SDK remain an explicit,
-exact-window DCC UI Control fallback.
+execution. One operator-allowlisted, fixed-signature HSL pipeline bridge covers
+host-installed production commands that have no official `Offline` equivalent.
+Application controls not exposed by the SDK remain an explicit, exact-window
+DCC UI Control fallback.
 
 Shogun Post ships an external Python SDK. The adapter runs in its own Python
 process and connects to the application's local control stream; it does not rely
@@ -49,6 +51,9 @@ on a general-purpose Python interpreter embedded in the Shogun Post UI.
   ROM labeling, subject calibration, auto-label, occlusion fixing, solve,
   QuickPost, or retarget through the official `Offline` interface; reconstruction,
   occlusion, and solving setting updates are allowlisted and rollback-aware;
+- invoke one exact host-installed HSL pipeline command from an operator-owned
+  allowlist with only bounded load, mode, export, gap-fill, filter, and labeling
+  parameters; no command is enabled by default and no HSL source is accepted;
 - expose capability-gated import, save, and export calls that map directly to
   the official SDK;
 - register one Shogun Post GUI instance with the DCC-MCP local gateway.
@@ -63,7 +68,8 @@ return the previous value, and fail if Shogun does not return the requested
 sample. Processing requires an explicit
 `current_frame` or `selected_ranges` scope; the complete play range is not an
 available implicit default. The adapter does not expose scene replacement,
-arbitrary HSL/Python execution, or bulk raw trajectory writes. Existing outputs
+arbitrary HSL/Python execution, unallowlisted pipeline commands, or bulk raw
+trajectory writes. Existing outputs
 fail closed unless `overwrite=true`, and public results omit full file-system
 paths. The Scene surface does not expose object creation, removal, reparenting,
 setup-parameter creation/expression edits, or raw attribute writes. Attribute
@@ -165,6 +171,12 @@ The DCC-MCP listener uses an OS-assigned loopback port unless `--mcp-port` or
 `DCC_MCP_SHOGUN_PORT` is explicitly set. Use `dcc-mcp-cli list`, `search`,
 `describe`, and `call` rather than storing the resolved endpoint.
 
+Custom production pipelines are disabled by default. To enable the fixed typed
+pipeline bridge, set `DCC_MCP_SHOGUN_PIPELINE_ALLOWLIST` before starting the
+adapter to a comma-separated list of exact host-installed HSL command
+identifiers. The setting grants access only to those identifiers; it does not
+accept HSL source, paths, or command fragments.
+
 ## Validation
 
 ```powershell
@@ -184,7 +196,8 @@ python -m build
 - The scene Skill limits mutation to selection and display state; the file Skill
   exposes only bounded import/save/export operations; editing requires an
   explicit object/channel or subject/marker/frame; processing never defaults to
-  the full play range.
+  the full play range; pipeline execution requires an operator-owned exact
+  command allowlist and fixed typed arguments.
 - Authentication, licensing, UAC, and security dialogs are never automated.
 
 Vicon and Shogun are trademarks of Vicon Motion Systems Ltd. This independent

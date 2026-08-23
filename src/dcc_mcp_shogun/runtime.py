@@ -3,15 +3,23 @@
 from __future__ import annotations
 
 import math
+import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Union
 
-from .sdk import connect_client, official_interface, official_type
+from .sdk import ShogunSdkError, connect_client, official_interface, official_type
 
 MAX_TRAJECTORY_WINDOW = 2000
 MAX_CHANNEL_GAPS = 2000
 MAX_MOTION_FILE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_FRAME = 2_147_483_647
+PIPELINE_ALLOWLIST_ENV = "DCC_MCP_SHOGUN_PIPELINE_ALLOWLIST"
+MAX_PIPELINE_COMMANDS = 32
+MAX_PIPELINE_RESULT_LENGTH = 4096
+_PIPELINE_COMMAND_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
+_PIPELINE_PROCESSING_MODES = {"traditional": 0, "model": 1}
+_PIPELINE_FILL_GAP_MODES = {"disabled": 0, "rigid": 1, "labeling_constraint": 2}
 _SKELETONS = {"Labeling", "Solving"}
 _IMPORT_TYPES = {
     "selCreateNew",
@@ -1566,6 +1574,105 @@ def _bounded_int(value: Any, *, label: str, minimum: int, maximum: int) -> int:
     if not minimum <= normalized <= maximum:
         raise ValueError(f"{label} must be between {minimum} and {maximum}")
     return normalized
+
+
+def _pipeline_allowlist() -> frozenset[str]:
+    """Return the operator-owned, exact HSL command allowlist."""
+    raw = os.environ.get(PIPELINE_ALLOWLIST_ENV, "")
+    commands = [item.strip() for item in raw.split(",") if item.strip()]
+    if not commands:
+        raise ShogunSdkError(f"No pipeline commands are enabled by {PIPELINE_ALLOWLIST_ENV}")
+    if len(commands) > MAX_PIPELINE_COMMANDS:
+        raise ShogunSdkError(
+            f"{PIPELINE_ALLOWLIST_ENV} may contain at most {MAX_PIPELINE_COMMANDS} commands"
+        )
+    if any(_PIPELINE_COMMAND_PATTERN.fullmatch(command) is None for command in commands):
+        raise ShogunSdkError(f"{PIPELINE_ALLOWLIST_ENV} contains an invalid command name")
+    return frozenset(commands)
+
+
+def run_pipeline_command(
+    command_name: str,
+    *,
+    load_type: Any,
+    processing_mode: str,
+    export_c3d: Any,
+    export_fbx: Any,
+    fill_gap_mode: str,
+    fill_gap_width: Any,
+    filter_cutoff: Any,
+    filter_threshold: Any,
+    label_threshold: Any,
+) -> Dict[str, Any]:
+    """Run one operator-allowlisted HSL pipeline command with a fixed signature.
+
+    Only the validated command token enters the HSL source. Every parameter is
+    converted to a bounded numeric literal before the SDK connection is opened.
+    """
+    command = _bounded_text(command_name, label="command_name", maximum=64)
+    if _PIPELINE_COMMAND_PATTERN.fullmatch(command) is None:
+        raise ValueError("command_name must be a simple HSL command identifier")
+    if command not in _pipeline_allowlist():
+        raise ShogunSdkError("The requested pipeline command is not enabled")
+
+    if processing_mode not in _PIPELINE_PROCESSING_MODES:
+        raise ValueError("processing_mode must be traditional or model")
+    if fill_gap_mode not in _PIPELINE_FILL_GAP_MODES:
+        raise ValueError("fill_gap_mode must be disabled, rigid, or labeling_constraint")
+
+    normalized = {
+        "load_type": _bounded_int(load_type, label="load_type", minimum=0, maximum=3),
+        "processing_mode": processing_mode,
+        "export_c3d": _validated_bool(export_c3d),
+        "export_fbx": _validated_bool(export_fbx),
+        "fill_gap_mode": fill_gap_mode,
+        "fill_gap_width": _bounded_int(
+            fill_gap_width, label="fill_gap_width", minimum=0, maximum=10_000
+        ),
+        "filter_cutoff": _bounded_float(
+            filter_cutoff, label="filter_cutoff", minimum=0.0, maximum=1_000_000.0
+        ),
+        "filter_threshold": _bounded_float(
+            filter_threshold, label="filter_threshold", minimum=0.0, maximum=1_000_000.0
+        ),
+        "label_threshold": _bounded_float(
+            label_threshold, label="label_threshold", minimum=0.0, maximum=1_000_000.0
+        ),
+    }
+    arguments = (
+        normalized["load_type"],
+        _PIPELINE_PROCESSING_MODES[processing_mode],
+        int(normalized["export_c3d"]),
+        int(normalized["export_fbx"]),
+        _PIPELINE_FILL_GAP_MODES[fill_gap_mode],
+        normalized["fill_gap_width"],
+        normalized["filter_cutoff"],
+        normalized["filter_threshold"],
+        normalized["label_threshold"],
+    )
+    hsl = "{}({});".format(command, ", ".join(str(value) for value in arguments))
+
+    client = connect_client()
+    execute_hsl = getattr(client, "HSL", None)
+    if not callable(execute_hsl):
+        raise ShogunSdkError("The selected Shogun host does not expose HSL execution")
+    try:
+        result = execute_hsl(hsl)
+    except Exception as error:
+        raise ShogunSdkError(
+            f"The host rejected the allowlisted pipeline command ({type(error).__name__})"
+        ) from error
+    if not isinstance(result, str):
+        raise ShogunSdkError("The host returned an invalid HSL result")
+    if len(result) > MAX_PIPELINE_RESULT_LENGTH or "\x00" in result:
+        raise ShogunSdkError("The host returned an invalid HSL result")
+
+    return {
+        "command_name": command,
+        "parameters": normalized,
+        "host_acknowledged": True,
+        "host_result_reported": bool(result.strip()),
+    }
 
 
 def update_reconstruct_settings(
