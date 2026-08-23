@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dcc-mcp-shogun"
-version = "0.9.0"
+version = "0.10.0"
 description = "Typed DCC-MCP adapter for Vicon Shogun Post motion-capture workflows"
 readme = "README.md"
 requires-python = ">=3.9"
