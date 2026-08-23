@@ -26,8 +26,9 @@ Sources:
 | `shogun-files` | 3 | `ImportFile`, `SaveFile`, `ExportFile` | Extension/size/overwrite-gated file exchange |
 | `shogun-editing` | 5 | trajectory setters, `Channel`, `FIRFilter`, `WeightedAverageFilter` | One verified sample or one explicit channel; filters default to selected keys |
 | `shogun-production-context` | 8 | `Scene.ActiveClip`, `Clip`, `Character` | Bounded timing and QA state plus verified allowlisted updates; identities and notes excluded |
+| `shogun-pipeline` | 1 | `ViconShogunPost.HSL` | Operator-allowlisted command identifier plus one fixed, fully typed production signature |
 
-Total: 66 typed tools across six progressively loaded Skills.
+Total: 67 typed tools across seven progressively loaded Skills.
 
 Wheel-installed and public-PyPI adapters registered all 27 `shogun-scene` tools
 in live Shogun Post 1.19 hosts. In an initialized 100-frame blank session,
@@ -102,7 +103,7 @@ contract mirrors that workflow while reducing mutation scope:
 
 ## Intentionally not exposed
 
-- arbitrary Python, HSL, or command dispatch;
+- arbitrary Python, HSL source, or unallowlisted command dispatch;
 - generic attribute/property setters;
 - unbounded key deletion or bulk raw trajectory replacement;
 - scene-object creation/removal/reparenting without a workflow-specific typed

@@ -27,6 +27,7 @@ def test_bundled_skills_exist():
         "shogun-processing",
         "shogun-editing",
         "shogun-production-context",
+        "shogun-pipeline",
     ):
         assert (root / name / "SKILL.md").is_file()
         assert (root / name / "tools.yaml").is_file()
@@ -83,6 +84,13 @@ def test_skills_keep_read_and_mutation_boundaries_explicit():
     assert processing_skill.count("destructive_hint: true") == 8
     assert "arbitrary" not in processing_skill
 
+    pipeline_skill = (root / "shogun-pipeline" / "tools.yaml").read_text(encoding="utf-8")
+    assert pipeline_skill.count("  - name:") == 1
+    assert pipeline_skill.count("additionalProperties: false") == 1
+    assert pipeline_skill.count("destructive_hint: true") == 1
+    assert "hsl_source" not in pipeline_skill
+    assert "script_path" not in pipeline_skill
+
     editing_skill = (root / "shogun-editing" / "tools.yaml").read_text(encoding="utf-8")
     assert editing_skill.count("  - name:") == 5
     assert editing_skill.count("additionalProperties: false") == 5
@@ -119,6 +127,7 @@ def test_release_sources_are_synchronized_by_release_please():
         "src/dcc_mcp_shogun/skills/shogun-processing/SKILL.md",
         "src/dcc_mcp_shogun/skills/shogun-editing/SKILL.md",
         "src/dcc_mcp_shogun/skills/shogun-production-context/SKILL.md",
+        "src/dcc_mcp_shogun/skills/shogun-pipeline/SKILL.md",
     ):
         assert path in config
 
@@ -162,7 +171,7 @@ def test_official_sdk_coverage_tracks_production_context_contracts():
     coverage = (root / "docs" / "official-sdk-coverage.md").read_text(encoding="utf-8")
     readme = (root / "README.md").read_text(encoding="utf-8")
 
-    assert "Total: 66 typed tools" in coverage
+    assert "Total: 67 typed tools" in coverage
     for contract in (
         "set_active_clip",
         "update_clip_timing",

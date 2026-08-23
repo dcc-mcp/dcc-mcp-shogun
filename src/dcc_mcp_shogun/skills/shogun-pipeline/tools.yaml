@@ -1,0 +1,61 @@
+tools:
+  - name: run_pipeline_command
+    description: Run one operator-allowlisted host HSL pipeline command with a fixed typed signature.
+    source_file: scripts/run_pipeline_command.py
+    input_schema:
+      type: object
+      required:
+        - command_name
+        - load_type
+        - processing_mode
+        - export_c3d
+        - export_fbx
+        - fill_gap_mode
+        - fill_gap_width
+        - filter_cutoff
+        - filter_threshold
+        - label_threshold
+      properties:
+        command_name:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: "^[A-Za-z_][A-Za-z0-9_]*$"
+        load_type: {type: integer, minimum: 0, maximum: 3}
+        processing_mode: {type: string, enum: [traditional, model]}
+        export_c3d: {type: boolean}
+        export_fbx: {type: boolean}
+        fill_gap_mode: {type: string, enum: [disabled, rigid, labeling_constraint]}
+        fill_gap_width: {type: integer, minimum: 0, maximum: 10000}
+        filter_cutoff: {type: number, minimum: 0, maximum: 1000000}
+        filter_threshold: {type: number, minimum: 0, maximum: 1000000}
+        label_threshold: {type: number, minimum: 0, maximum: 1000000}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations:
+      read_only_hint: false
+      destructive_hint: true
+      idempotent_hint: false
+      open_world_hint: false
+      deferred_hint: true
+    next-tools:
+      on-success: [shogun_scene__inspect_scene]
+      on-failure: [shogun_scene__inspect_scene]
+    call_examples:
+      - arguments:
+          command_name: studioPipeline
+          load_type: 2
+          processing_mode: model
+          export_c3d: true
+          export_fbx: false
+          fill_gap_mode: labeling_constraint
+          fill_gap_width: 50
+          filter_cutoff: 0.3
+          filter_threshold: 15
+          label_threshold: 10
+        note: Run an operator-enabled pipeline command with explicit production parameters.
