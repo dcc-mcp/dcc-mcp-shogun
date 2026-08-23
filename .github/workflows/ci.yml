@@ -32,6 +32,7 @@ jobs:
       - run: python -m ruff check src tests tools examples
       - run: python -m ruff format --check src tests tools examples
       - run: python -m pytest
+      - run: python tools/smoke_doctor.py
       - run: python tools/lint_skills.py
       - run: python -m build
       - run: python -m twine check dist/*

@@ -8,6 +8,8 @@
       "extra-files": [
         {"type": "toml", "path": "pyproject.toml", "jsonpath": "$.project.version"},
         {"type": "generic", "path": "src/dcc_mcp_shogun/__version__.py"},
+        {"type": "generic", "path": "README.md"},
+        {"type": "generic", "path": "install.md"},
         {"type": "generic", "path": "src/dcc_mcp_shogun/skills/shogun-scene/SKILL.md"},
         {"type": "generic", "path": "src/dcc_mcp_shogun/skills/shogun-files/SKILL.md"},
         {"type": "generic", "path": "src/dcc_mcp_shogun/skills/shogun-timeline/SKILL.md"},

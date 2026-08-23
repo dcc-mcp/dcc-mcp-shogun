@@ -108,7 +108,10 @@ def stop_server() -> None:
 
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the Vicon Shogun Post DCC-MCP adapter.")
+    parser = argparse.ArgumentParser(
+        description="Run the Vicon Shogun Post DCC-MCP adapter.",
+        epilog="Runtime checks: dcc-mcp-shogun doctor --json | verify --json",
+    )
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--host-pid", type=int, required=True)
     parser.add_argument("--sdk-path", type=Path)
@@ -117,7 +120,12 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
-    args = _parse_args(list(argv) if argv is not None else sys.argv[1:])
+    arguments = list(argv) if argv is not None else sys.argv[1:]
+    if arguments and arguments[0] in {"doctor", "verify"}:
+        from .diagnostics import run_cli
+
+        raise SystemExit(run_cli(arguments))
+    args = _parse_args(arguments)
     if args.host_pid <= 0:
         raise SystemExit("--host-pid must be a positive process id")
 

@@ -23,6 +23,22 @@ Shogun Post ships an external Python SDK. The adapter runs in its own Python
 process and connects to the application's local control stream; it does not rely
 on a general-purpose Python interpreter embedded in the Shogun Post UI.
 
+## Installation
+
+Install the released wheel, then verify the exact Shogun Post process before
+starting the adapter:
+
+```powershell
+python -m pip install "dcc-mcp-shogun==0.9.0" # x-release-please-version
+$env:DCC_MCP_SHOGUN_HOST_PID = "<SHOGUN_POST_PID>"
+dcc-mcp-shogun doctor --json
+dcc-mcp-shogun verify --json
+```
+
+Continue only when `directly_usable` is `true`. See the complete
+[Install SOP](install.md) for the agent quick path, supported platforms and
+versions, upgrade, uninstall, stable exit codes, and troubleshooting.
+
 ## Capabilities
 
 - inspect path-redacted scene metadata and bounded subject lists;
@@ -144,8 +160,8 @@ inspection, and evidence workflow.
 
 ## Local development
 
-Start Vicon Shogun Post with your normal application launcher. Then install
-this adapter in a Python environment that can import `dcc-mcp-core`:
+For repository development only, start Vicon Shogun Post with your normal
+application launcher and use an editable install:
 
 ```powershell
 python -m pip install -e ".[dev]"
