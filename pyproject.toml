@@ -45,6 +45,7 @@ include = [
   "docs",
   "examples",
   "README.md",
+  "install.md",
   "LICENSE",
   "release-please-config.json",
   ".release-please-manifest.json",

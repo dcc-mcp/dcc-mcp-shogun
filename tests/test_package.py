@@ -121,6 +121,8 @@ def test_release_sources_are_synchronized_by_release_please():
     for path in (
         "pyproject.toml",
         "src/dcc_mcp_shogun/__version__.py",
+        "README.md",
+        "install.md",
         "src/dcc_mcp_shogun/skills/shogun-scene/SKILL.md",
         "src/dcc_mcp_shogun/skills/shogun-files/SKILL.md",
         "src/dcc_mcp_shogun/skills/shogun-timeline/SKILL.md",
@@ -156,6 +158,31 @@ def test_documentation_images_are_excluded_from_sdist():
     assert '"docs/**/*.png"' in pyproject
     assert '"docs/**/*.svg"' in pyproject
     assert '"docs/**/*.webp"' in pyproject
+    assert '"install.md"' in pyproject
+
+
+def test_install_sop_documents_the_machine_contract():
+    root = Path(__file__).parents[1]
+    install = (root / "install.md").read_text(encoding="utf-8")
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    for heading in (
+        "## Requirements",
+        "## Supported versions",
+        "## Agent quick path",
+        "## Manual path",
+        "## Verify",
+        "## Upgrade",
+        "## Uninstall",
+        "## Troubleshooting",
+    ):
+        assert heading in install
+    assert "dcc-mcp-shogun doctor --json" in install
+    assert "dcc-mcp-shogun verify --json" in install
+    assert "directly_usable" in install
+    assert "install.md" in readme
+    assert 'dependencies = ["dcc-mcp-core>=0.19.86,<1.0.0"]' in (root / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_showcase_assets_are_present_and_bounded():
