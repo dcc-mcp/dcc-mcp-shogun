@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -1229,9 +1230,23 @@ def test_file_operations_validate_paths_and_return_only_safe_labels(client, tmp_
     assert str(tmp_path) not in repr(imported)
 
     scene = tmp_path / "result.vdf"
+    scene_names = iter(
+        [
+            ("C:/production/Take01.vdf", "Take01.vdf"),
+            (str(scene), scene.name),
+        ]
+    )
+    client.GetSceneName = lambda: next(scene_names)
     saved = runtime.save_scene(scene)
-    assert saved == {"file_name": "result.vdf", "file_size_bytes": 3}
+    assert saved == {
+        "receipt_version": 1,
+        "file_name": "result.vdf",
+        "file_size_bytes": 3,
+        "sha256": hashlib.sha256(b"vdf").hexdigest(),
+        "active_scene_changed": True,
+    }
     assert client.calls[-1] == ("SaveFile", str(scene.resolve()), "")
+    assert str(tmp_path) not in repr(saved)
 
     export = tmp_path / "result.bvh"
     exported = runtime.export_motion(export)
@@ -1254,6 +1269,27 @@ def test_file_operations_fail_closed_for_wrong_extensions_and_overwrite(client, 
     with pytest.raises(FileExistsError):
         runtime.save_scene(existing)
     assert all(call[0] != "SaveFile" for call in client.calls)
+
+
+@pytest.mark.parametrize("payload", [None, b""])
+def test_save_scene_rejects_missing_or_empty_output(client, tmp_path, payload):
+    def save_file(filename, appendage):
+        client.calls.append(("SaveFile", filename, appendage))
+        if payload is not None:
+            Path(filename).write_bytes(payload)
+
+    client.SaveFile = save_file
+
+    with pytest.raises(RuntimeError, match="did not create"):
+        runtime.save_scene(tmp_path / "recovery.vdf")
+
+
+def test_save_scene_reports_when_active_scene_did_not_change(client, tmp_path):
+    client.GetSceneName = lambda: ("C:/production", "C:/production/Take01.vdf")
+
+    receipt = runtime.save_scene(tmp_path / "recovery.vdf")
+
+    assert receipt["active_scene_changed"] is False
 
 
 def test_blank_scene_is_not_reported_as_saved(monkeypatch):

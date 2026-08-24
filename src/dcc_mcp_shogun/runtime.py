@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import re
@@ -196,6 +197,14 @@ def _output_file(
     if path.exists() and not overwrite:
         raise FileExistsError(path.name)
     return path
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def inspect_scene(max_subjects: int = 100) -> Dict[str, Any]:
@@ -1322,10 +1331,23 @@ def import_motion(
 
 def save_scene(file_path: Union[Path, str], *, overwrite: bool = False) -> Dict[str, Any]:
     path = _output_file(file_path, suffixes={".vdf"}, overwrite=overwrite)
-    connect_client().SaveFile(str(path), "")
-    if not path.is_file() or path.stat().st_size <= 0:
+    client = connect_client()
+    active_scene_before = tuple(client.GetSceneName())
+    client.SaveFile(str(path), "")
+    active_scene_after = tuple(client.GetSceneName())
+    if not path.is_file():
         raise RuntimeError("Shogun did not create the requested scene file")
-    return {"file_name": path.name, "file_size_bytes": path.stat().st_size}
+    file_size = path.stat().st_size
+    if file_size <= 0:
+        raise RuntimeError("Shogun did not create the requested scene file")
+
+    return {
+        "receipt_version": 1,
+        "file_name": path.name,
+        "file_size_bytes": file_size,
+        "sha256": _sha256_file(path),
+        "active_scene_changed": active_scene_after != active_scene_before,
+    }
 
 
 def export_motion(file_path: Union[Path, str], *, overwrite: bool = False) -> Dict[str, Any]:

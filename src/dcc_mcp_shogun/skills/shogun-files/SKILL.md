@@ -26,10 +26,12 @@ only with exact operator-owned local paths. Imports are size-bounded and accept
 only `.bvh`, `.c3d`, or `.mcp`. Saves require `.vdf`; exports accept `.bvh`,
 `.c3d`, `.fbx`, or `.mcp`.
 
-Existing output files fail closed unless `overwrite=true`. Results contain only
-base names, byte counts, and formats; they never return full paths. The Skill
-does not expose scene replacement, arbitrary HSL/Python execution, or raw
-trajectory writes.
+Existing output files fail closed unless `overwrite=true`. A successful save
+returns a versioned recovery receipt containing only the VDF base name, byte
+count, SHA-256 digest, and whether the vendor reported a different active scene
+after saving. Other results contain only base names, byte counts, and formats;
+they never return full paths. The Skill does not expose scene replacement,
+arbitrary HSL/Python execution, or raw trajectory writes.
 
 These operations are capability-gated by the selected Shogun Post build and
 license. Shogun Post 1.19 is known to reject the official SDK `ImportFile` call
