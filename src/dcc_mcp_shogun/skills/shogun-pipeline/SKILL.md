@@ -50,3 +50,9 @@ scene-state read-back for custom scripts. The tool therefore reports only
 whether the host call returned and whether a result was present; it does not
 expose the result text or claim that custom scene effects were verified. Follow
 with the narrowest applicable typed scene inspection tool.
+
+The async `timeout_hint_secs: 1800` value is a scheduling hint for a potentially
+long pipeline operation. It is not a hard HSL execution deadline, a sidecar
+lease, or a promise that jobs survive an adapter or gateway restart. Keep the
+exact Shogun host process and its adapter sidecar running, poll the Core-owned
+job status, and verify the scene afterward.

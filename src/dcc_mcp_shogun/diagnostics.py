@@ -16,6 +16,7 @@ from .runtime import pipeline_policy_receipt
 from .sdk import (
     CONTROL_PORT_ENV,
     SDK_ENV,
+    ProcessLiveness,
     candidate_control_ports,
     configure_sdk,
     host_product_version,
@@ -236,20 +237,26 @@ def collect_diagnostics(
         )
     else:
         try:
-            alive = process_is_alive(resolved_pid)
+            liveness = (
+                ProcessLiveness.ALIVE if process_is_alive(resolved_pid) else ProcessLiveness.EXITED
+            )
         except Exception:
-            alive = False
+            liveness = ProcessLiveness.INDETERMINATE
+        host_failure_reason = {
+            ProcessLiveness.EXITED: "host_process_exited",
+            ProcessLiveness.INDETERMINATE: "host_process_probe_failed",
+        }.get(liveness)
         checks.append(
             _check(
                 "host_process",
-                "ok" if alive else "fail",
-                observed="alive" if alive else "unavailable",
-                reason=None if alive else "host_process_unavailable",
+                "ok" if liveness is ProcessLiveness.ALIVE else "fail",
+                observed=liveness.value,
+                reason=host_failure_reason,
             )
         )
-        if not alive:
+        if liveness is not ProcessLiveness.ALIVE:
             checks.extend(
-                _skipped(identifier, "host_process_unavailable")
+                _skipped(identifier, host_failure_reason or "host_process_probe_failed")
                 for identifier in (
                     "host_executable",
                     "host_version",
@@ -257,12 +264,21 @@ def collect_diagnostics(
                     "control_stream",
                 )
             )
+            probe_failed = liveness is ProcessLiveness.INDETERMINATE
             next_steps.append(
                 _next_step(
-                    "rebind_exact_host",
-                    "Bind a live exact Shogun Post process and rerun doctor.",
+                    "retry_exact_host_probe" if probe_failed else "rebind_exact_host",
+                    (
+                        "Retry diagnostics for the same exact Shogun Post process."
+                        if probe_failed
+                        else "Bind a live exact Shogun Post process and rerun doctor."
+                    ),
                     ["dcc-mcp-shogun", "doctor", "--json"],
-                    "The supplied process is not available to the adapter.",
+                    (
+                        "The adapter could not determine whether the supplied process is alive."
+                        if probe_failed
+                        else "The supplied process has exited."
+                    ),
                     requires=[{"environment": _HOST_PID_ENV, "type": "positive_integer"}],
                 )
             )
