@@ -31,3 +31,23 @@ def test_safe_result_redacts_exception_details():
     assert result["context"]["error_type"] == "RuntimeError"
     assert "private" not in repr(result).lower()
     assert "traceback" not in repr(result).lower()
+
+
+def test_safe_result_nests_recovery_receipt_in_standard_context():
+    receipt = {
+        "receipt_version": 1,
+        "file_name": "recovery.vdf",
+        "file_size_bytes": 3,
+        "sha256": "0" * 64,
+        "active_scene_changed": False,
+    }
+
+    result = _result_module().safe_result("Shogun scene saved.", lambda: receipt)
+
+    assert result == {
+        "success": True,
+        "message": "Shogun scene saved.",
+        "prompt": None,
+        "error": None,
+        "context": receipt,
+    }
