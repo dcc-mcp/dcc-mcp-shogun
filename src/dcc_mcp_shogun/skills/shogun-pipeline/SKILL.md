@@ -25,11 +25,18 @@ Use `shogun-pipeline__run_pipeline_command` only after inspecting the scene,
 saving a recovery copy, and confirming the intended production parameters.
 The host operator must set `DCC_MCP_SHOGUN_PIPELINE_ALLOWLIST` to a
 comma-separated list of exact installed command identifiers before starting
-the adapter. No commands are enabled by default.
+the adapter. They must also set `DCC_MCP_SHOGUN_PIPELINE_ABI=fixed9-v1` to
+attest that every enabled command implements the exact positional contract
+below. No commands are enabled by default, and an absent or unsupported ABI
+attestation fails before the adapter connects to the host.
 
 The command contract is fixed and positional:
 
 `command(load_type, processing_mode, export_c3d, export_fbx, fill_gap_mode, fill_gap_width, filter_cutoff, filter_threshold, label_threshold)`
+
+A no-argument host script is not directly compatible with `fixed9-v1`. It may
+only be invoked through a separately audited host wrapper that implements this
+exact signature. The adapter does not discover, install, or rewrite wrappers.
 
 Modes and Boolean values are converted to bounded numeric literals. The public
 tool never accepts HSL source, script paths, free-form strings, extra arguments,

@@ -15,6 +15,8 @@ MAX_CHANNEL_GAPS = 2000
 MAX_MOTION_FILE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_FRAME = 2_147_483_647
 PIPELINE_ALLOWLIST_ENV = "DCC_MCP_SHOGUN_PIPELINE_ALLOWLIST"
+PIPELINE_ABI_ENV = "DCC_MCP_SHOGUN_PIPELINE_ABI"
+PIPELINE_ABI_FIXED9_V1 = "fixed9-v1"
 MAX_PIPELINE_COMMANDS = 32
 MAX_PIPELINE_RESULT_LENGTH = 4096
 _PIPELINE_COMMAND_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
@@ -1602,11 +1604,16 @@ def _pipeline_allowlist() -> frozenset[str]:
 def pipeline_policy_receipt(requested_command: Optional[str] = None) -> Dict[str, Any]:
     """Return bounded diagnostics for the operator-owned pipeline policy."""
     commands, policy_valid = _parse_pipeline_policy(os.environ.get(PIPELINE_ALLOWLIST_ENV, ""))
+    abi = os.environ.get(PIPELINE_ABI_ENV, "").strip()
+    abi_valid = abi == PIPELINE_ABI_FIXED9_V1
     receipt = {
         "configured": bool(commands),
         "valid": policy_valid,
         "command_count": len(commands),
         "restart_required": True,
+        "abi_configured": bool(abi),
+        "abi_valid": abi_valid,
+        "abi_version": PIPELINE_ABI_FIXED9_V1 if abi_valid else None,
     }
     if requested_command is not None:
         requested_valid = _PIPELINE_COMMAND_PATTERN.fullmatch(requested_command) is not None
@@ -1614,6 +1621,14 @@ def pipeline_policy_receipt(requested_command: Optional[str] = None) -> Dict[str
             policy_valid and requested_valid and requested_command in frozenset(commands)
         )
     return receipt
+
+
+def _require_pipeline_abi() -> None:
+    """Require an explicit operator attestation for the fixed positional ABI."""
+    if os.environ.get(PIPELINE_ABI_ENV, "").strip() != PIPELINE_ABI_FIXED9_V1:
+        raise ShogunSdkError(
+            f"The pipeline command ABI must be explicitly set to {PIPELINE_ABI_FIXED9_V1}"
+        )
 
 
 def run_pipeline_command(
@@ -1639,6 +1654,7 @@ def run_pipeline_command(
         raise ValueError("command_name must be a simple HSL command identifier")
     if command not in _pipeline_allowlist():
         raise ShogunSdkError("The requested pipeline command is not enabled")
+    _require_pipeline_abi()
 
     if processing_mode not in _PIPELINE_PROCESSING_MODES:
         raise ValueError("processing_mode must be traditional or model")

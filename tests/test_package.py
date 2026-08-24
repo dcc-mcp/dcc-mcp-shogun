@@ -91,6 +91,15 @@ def test_skills_keep_read_and_mutation_boundaries_explicit():
     assert "hsl_source" not in pipeline_skill
     assert "script_path" not in pipeline_skill
 
+    pipeline_instructions = (root / "shogun-pipeline" / "SKILL.md").read_text(encoding="utf-8")
+    for contract_term in (
+        "DCC_MCP_SHOGUN_PIPELINE_ABI",
+        "fixed9-v1",
+        "no-argument",
+        "audited host wrapper",
+    ):
+        assert contract_term in pipeline_instructions
+
     editing_skill = (root / "shogun-editing" / "tools.yaml").read_text(encoding="utf-8")
     assert editing_skill.count("  - name:") == 5
     assert editing_skill.count("additionalProperties: false") == 5
