@@ -6,7 +6,7 @@ import math
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 from .sdk import ShogunSdkError, connect_client, official_interface, official_type
 
@@ -1576,19 +1576,44 @@ def _bounded_int(value: Any, *, label: str, minimum: int, maximum: int) -> int:
     return normalized
 
 
+def _parse_pipeline_policy(raw: str) -> tuple[List[str], bool]:
+    """Normalize pipeline identifiers and report bounded policy validity."""
+    commands = [item.strip() for item in raw.split(",") if item.strip()]
+    policy_valid = len(commands) <= MAX_PIPELINE_COMMANDS and all(
+        _PIPELINE_COMMAND_PATTERN.fullmatch(command) is not None for command in commands
+    )
+    return commands, policy_valid
+
+
 def _pipeline_allowlist() -> frozenset[str]:
     """Return the operator-owned, exact HSL command allowlist."""
-    raw = os.environ.get(PIPELINE_ALLOWLIST_ENV, "")
-    commands = [item.strip() for item in raw.split(",") if item.strip()]
+    commands, policy_valid = _parse_pipeline_policy(os.environ.get(PIPELINE_ALLOWLIST_ENV, ""))
     if not commands:
         raise ShogunSdkError(f"No pipeline commands are enabled by {PIPELINE_ALLOWLIST_ENV}")
     if len(commands) > MAX_PIPELINE_COMMANDS:
         raise ShogunSdkError(
             f"{PIPELINE_ALLOWLIST_ENV} may contain at most {MAX_PIPELINE_COMMANDS} commands"
         )
-    if any(_PIPELINE_COMMAND_PATTERN.fullmatch(command) is None for command in commands):
+    if not policy_valid:
         raise ShogunSdkError(f"{PIPELINE_ALLOWLIST_ENV} contains an invalid command name")
     return frozenset(commands)
+
+
+def pipeline_policy_receipt(requested_command: Optional[str] = None) -> Dict[str, Any]:
+    """Return bounded diagnostics for the operator-owned pipeline policy."""
+    commands, policy_valid = _parse_pipeline_policy(os.environ.get(PIPELINE_ALLOWLIST_ENV, ""))
+    receipt = {
+        "configured": bool(commands),
+        "valid": policy_valid,
+        "command_count": len(commands),
+        "restart_required": True,
+    }
+    if requested_command is not None:
+        requested_valid = _PIPELINE_COMMAND_PATTERN.fullmatch(requested_command) is not None
+        receipt["requested_command_enabled"] = (
+            policy_valid and requested_valid and requested_command in frozenset(commands)
+        )
+    return receipt
 
 
 def run_pipeline_command(

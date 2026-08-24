@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from .__version__ import __version__
+from .runtime import pipeline_policy_receipt
 from .sdk import (
     CONTROL_PORT_ENV,
     SDK_ENV,
@@ -124,6 +125,7 @@ def collect_diagnostics(
     mode: str,
     host_pid: Optional[int] = None,
     sdk_path: Optional[Path] = None,
+    pipeline_command: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Collect bounded prerequisites and a real control-stream handshake."""
     if mode not in {"doctor", "verify"}:
@@ -384,6 +386,7 @@ def collect_diagnostics(
         "directly_usable": directly_usable,
         "failure_stage": failure_stage,
         "failure_reason": failure_reason,
+        "pipeline_policy": pipeline_policy_receipt(pipeline_command),
         "config": {
             "host_pid_source": pid_source,
             "sdk_path_override": sdk_path is not None or SDK_ENV in os.environ,
@@ -408,12 +411,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument("--host-pid", type=int)
     parser.add_argument("--sdk-path", type=Path)
+    parser.add_argument("--pipeline-command")
     return parser
 
 
 def run_cli(argv: Sequence[str]) -> int:
     args = _parser().parse_args(argv)
-    report = collect_diagnostics(mode=args.verb, host_pid=args.host_pid, sdk_path=args.sdk_path)
+    report = collect_diagnostics(
+        mode=args.verb,
+        host_pid=args.host_pid,
+        sdk_path=args.sdk_path,
+        pipeline_command=args.pipeline_command,
+    )
     if args.as_json:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     else:
