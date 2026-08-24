@@ -85,6 +85,46 @@ def test_windows_open_process_errors_have_typed_liveness(monkeypatch, windows_er
     assert sdk.probe_process_liveness(42) is expected
 
 
+def test_windows_bound_probe_tracks_original_identity_across_pid_reuse(monkeypatch):
+    original_handle = 101
+    replacement_handle = 202
+
+    class Call:
+        def __init__(self, implementation):
+            self.implementation = implementation
+            self.calls = []
+            self.argtypes = None
+            self.restype = None
+
+        def __call__(self, *args):
+            self.calls.append(args)
+            return self.implementation(*args)
+
+    opened_handles = iter([original_handle, replacement_handle])
+    original_waits = iter([sdk._WAIT_TIMEOUT, sdk._WAIT_OBJECT_0])
+    open_process = Call(lambda *_args: next(opened_handles))
+    wait_for_single_object = Call(
+        lambda handle, _timeout: (
+            next(original_waits) if handle == original_handle else sdk._WAIT_TIMEOUT
+        )
+    )
+    close_handle = Call(lambda _handle: True)
+    kernel32 = types.SimpleNamespace(
+        OpenProcess=open_process,
+        WaitForSingleObject=wait_for_single_object,
+        CloseHandle=close_handle,
+    )
+    monkeypatch.setattr(sdk.os, "name", "nt")
+    monkeypatch.setattr(sdk.ctypes, "WinDLL", lambda *_args, **_kwargs: kernel32, raising=False)
+
+    with sdk.bind_process_liveness(42) as probe:
+        assert probe() is sdk.ProcessLiveness.ALIVE
+        assert probe() is sdk.ProcessLiveness.EXITED
+
+    assert open_process.calls == [(sdk._PROCESS_SYNCHRONIZE, False, 42)]
+    assert close_handle.calls == [(original_handle,)]
+
+
 def _fake_sdk(root: Path) -> Path:
     root.mkdir()
     (root / "vicon_shogun_post.py").write_text("", encoding="utf-8")

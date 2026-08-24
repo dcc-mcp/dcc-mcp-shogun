@@ -157,7 +157,10 @@ Retry diagnostics for the same exact PID. The sidecar tolerates two consecutive
 indeterminate probes and fails closed on the third; it never scans for or binds
 another process. Its structured exit telemetry contains only the reason,
 uptime, and consecutive failure count, without the PID, paths, or raw probe
-errors.
+errors, and is emitted as JSON to the sidecar's operator-visible standard error
+stream. On Windows, the monitor holds one `SYNCHRONIZE` handle to the original
+process identity for its lifecycle and closes it on exit, so PID reuse cannot
+silently rebind the sidecar.
 
 ### `incompatible_core_version`
 

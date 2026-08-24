@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
 import os
 import signal
 import sys
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Optional, Sequence
+from typing import Callable, ContextManager, Dict, Optional, Sequence
 
 from dcc_mcp_core import DccServerOptions, HostExecutionBridge
 from dcc_mcp_core.readiness import AdapterReadinessBinder
@@ -22,18 +22,17 @@ from .__version__ import __version__
 from .dispatcher import ShogunSdkDispatcher
 from .sdk import (
     ProcessLiveness,
+    bind_process_liveness,
     configure_control_port,
     configure_sdk,
     connect_client,
     host_product_version,
-    probe_process_liveness,
     resolve_sdk_path,
 )
 from .state import bind_server, unbind_server
 
 _server: Optional["ShogunMcpServer"] = None
 _MAX_CONSECUTIVE_PROBE_FAILURES = 3
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -59,7 +58,10 @@ def monitor_host_liveness(
     host_pid: int,
     *,
     stopped: Optional[threading.Event] = None,
-    probe: Callable[[int], ProcessLiveness] = probe_process_liveness,
+    probe: Optional[Callable[[int], ProcessLiveness]] = None,
+    binding_factory: Callable[
+        [int], ContextManager[Callable[[], ProcessLiveness]]
+    ] = bind_process_liveness,
     monotonic: Callable[[], float] = time.monotonic,
     poll_interval_seconds: float = 1.0,
 ) -> SidecarExitReceipt:
@@ -67,32 +69,34 @@ def monitor_host_liveness(
     started_at = monotonic()
     stop_event = stopped or threading.Event()
     consecutive_probe_failures = 0
-    while not stop_event.wait(poll_interval_seconds):
-        try:
-            liveness = probe(host_pid)
-        except Exception:
-            liveness = ProcessLiveness.INDETERMINATE
-        if liveness is ProcessLiveness.EXITED:
-            return SidecarExitReceipt(
-                exit_reason="host_process_exited",
-                uptime_seconds=max(0.0, monotonic() - started_at),
-                consecutive_probe_failures=consecutive_probe_failures,
-            )
-        if liveness is ProcessLiveness.INDETERMINATE:
-            consecutive_probe_failures += 1
-            if consecutive_probe_failures >= _MAX_CONSECUTIVE_PROBE_FAILURES:
+    binding = binding_factory(host_pid) if probe is None else nullcontext(lambda: probe(host_pid))
+    with binding as bound_probe:
+        while not stop_event.wait(poll_interval_seconds):
+            try:
+                liveness = ProcessLiveness(bound_probe())
+            except Exception:
+                liveness = ProcessLiveness.INDETERMINATE
+            if liveness is ProcessLiveness.EXITED:
                 return SidecarExitReceipt(
-                    exit_reason="host_process_probe_failed",
+                    exit_reason="host_process_exited",
                     uptime_seconds=max(0.0, monotonic() - started_at),
                     consecutive_probe_failures=consecutive_probe_failures,
                 )
-        else:
-            consecutive_probe_failures = 0
-    return SidecarExitReceipt(
-        exit_reason="signal",
-        uptime_seconds=max(0.0, monotonic() - started_at),
-        consecutive_probe_failures=consecutive_probe_failures,
-    )
+            if liveness is ProcessLiveness.INDETERMINATE:
+                consecutive_probe_failures += 1
+                if consecutive_probe_failures >= _MAX_CONSECUTIVE_PROBE_FAILURES:
+                    return SidecarExitReceipt(
+                        exit_reason="host_process_probe_failed",
+                        uptime_seconds=max(0.0, monotonic() - started_at),
+                        consecutive_probe_failures=consecutive_probe_failures,
+                    )
+            else:
+                consecutive_probe_failures = 0
+        return SidecarExitReceipt(
+            exit_reason="signal",
+            uptime_seconds=max(0.0, monotonic() - started_at),
+            consecutive_probe_failures=consecutive_probe_failures,
+        )
 
 
 class ShogunMcpServer(DccServerBase):
@@ -203,7 +207,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     start_server(port=args.mcp_port, host_pid=args.host_pid, sdk_path=args.sdk_path)
     try:
         receipt = monitor_host_liveness(args.host_pid, stopped=stopped)
-        logger.info(json.dumps(receipt.as_dict(), separators=(",", ":"), sort_keys=True))
+        print(
+            json.dumps(receipt.as_dict(), separators=(",", ":"), sort_keys=True),
+            file=sys.stderr,
+            flush=True,
+        )
     finally:
         stop_server()
 

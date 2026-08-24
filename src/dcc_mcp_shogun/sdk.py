@@ -9,10 +9,11 @@ import os
 import socket
 import sys
 import time
+from contextlib import contextmanager
 from ctypes import wintypes
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Iterator, Optional
 
 SDK_ENV = "DCC_MCP_SHOGUN_SDK_PATH"
 CONTROL_PORT_ENV = "DCC_MCP_SHOGUN_CONTROL_PORT"
@@ -275,6 +276,20 @@ def validate_control_port(port: int) -> Optional[Any]:
         return None
 
 
+def _windows_process_api() -> Optional[Any]:
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    except OSError:
+        return None
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return kernel32
+
+
 def probe_process_liveness(pid: int) -> ProcessLiveness:
     """Probe one explicit process without scanning for or binding another process.
 
@@ -293,16 +308,9 @@ def probe_process_liveness(pid: int) -> ProcessLiveness:
         except OSError:
             return ProcessLiveness.INDETERMINATE
         return ProcessLiveness.ALIVE
-    try:
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    except OSError:
+    kernel32 = _windows_process_api()
+    if kernel32 is None:
         return ProcessLiveness.INDETERMINATE
-    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
-    kernel32.WaitForSingleObject.restype = wintypes.DWORD
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel32.CloseHandle.restype = wintypes.BOOL
 
     handle = kernel32.OpenProcess(_PROCESS_SYNCHRONIZE, False, pid)
     if not handle:
@@ -324,6 +332,44 @@ def probe_process_liveness(pid: int) -> ProcessLiveness:
                 return ProcessLiveness.ALIVE
             return ProcessLiveness.INDETERMINATE
         return ProcessLiveness.INDETERMINATE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+@contextmanager
+def bind_process_liveness(pid: int) -> Iterator[Callable[[], ProcessLiveness]]:
+    """Bind liveness checks to the original process identity for one lifecycle."""
+    if pid <= 0:
+        yield lambda: ProcessLiveness.EXITED
+        return
+    if os.name != "nt":
+        yield lambda: probe_process_liveness(pid)
+        return
+    kernel32 = _windows_process_api()
+    if kernel32 is None:
+        yield lambda: ProcessLiveness.INDETERMINATE
+        return
+
+    handle = kernel32.OpenProcess(_PROCESS_SYNCHRONIZE, False, pid)
+    if not handle:
+        liveness = (
+            ProcessLiveness.EXITED
+            if ctypes.get_last_error() == _ERROR_INVALID_PARAMETER
+            else ProcessLiveness.INDETERMINATE
+        )
+        yield lambda: liveness
+        return
+
+    def probe_bound_process() -> ProcessLiveness:
+        wait_result = kernel32.WaitForSingleObject(handle, 0)
+        if wait_result == _WAIT_TIMEOUT:
+            return ProcessLiveness.ALIVE
+        if wait_result == _WAIT_OBJECT_0:
+            return ProcessLiveness.EXITED
+        return ProcessLiveness.INDETERMINATE
+
+    try:
+        yield probe_bound_process
     finally:
         kernel32.CloseHandle(handle)
 
