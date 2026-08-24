@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import json
+import logging
 import os
 import signal
 import sys
 import threading
+import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Callable, Dict, Optional, Sequence
 
 from dcc_mcp_core import DccServerOptions, HostExecutionBridge
 from dcc_mcp_core.readiness import AdapterReadinessBinder
@@ -17,16 +21,78 @@ from dcc_mcp_core.server_base import DccServerBase
 from .__version__ import __version__
 from .dispatcher import ShogunSdkDispatcher
 from .sdk import (
+    ProcessLiveness,
     configure_control_port,
     configure_sdk,
     connect_client,
     host_product_version,
-    process_is_alive,
+    probe_process_liveness,
     resolve_sdk_path,
 )
 from .state import bind_server, unbind_server
 
 _server: Optional["ShogunMcpServer"] = None
+_MAX_CONSECUTIVE_PROBE_FAILURES = 3
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SidecarExitReceipt:
+    """Sanitized reason for stopping one exact-host sidecar."""
+
+    exit_reason: str
+    uptime_seconds: float
+    consecutive_probe_failures: int
+    schema_version: str = "1.0"
+
+    def as_dict(self) -> Dict[str, object]:
+        """Return the stable telemetry payload without process or path details."""
+        return {
+            "schema_version": self.schema_version,
+            "exit_reason": self.exit_reason,
+            "uptime_seconds": self.uptime_seconds,
+            "consecutive_probe_failures": self.consecutive_probe_failures,
+        }
+
+
+def monitor_host_liveness(
+    host_pid: int,
+    *,
+    stopped: Optional[threading.Event] = None,
+    probe: Callable[[int], ProcessLiveness] = probe_process_liveness,
+    monotonic: Callable[[], float] = time.monotonic,
+    poll_interval_seconds: float = 1.0,
+) -> SidecarExitReceipt:
+    """Wait for a signal or the confirmed exit of one exact host process."""
+    started_at = monotonic()
+    stop_event = stopped or threading.Event()
+    consecutive_probe_failures = 0
+    while not stop_event.wait(poll_interval_seconds):
+        try:
+            liveness = probe(host_pid)
+        except Exception:
+            liveness = ProcessLiveness.INDETERMINATE
+        if liveness is ProcessLiveness.EXITED:
+            return SidecarExitReceipt(
+                exit_reason="host_process_exited",
+                uptime_seconds=max(0.0, monotonic() - started_at),
+                consecutive_probe_failures=consecutive_probe_failures,
+            )
+        if liveness is ProcessLiveness.INDETERMINATE:
+            consecutive_probe_failures += 1
+            if consecutive_probe_failures >= _MAX_CONSECUTIVE_PROBE_FAILURES:
+                return SidecarExitReceipt(
+                    exit_reason="host_process_probe_failed",
+                    uptime_seconds=max(0.0, monotonic() - started_at),
+                    consecutive_probe_failures=consecutive_probe_failures,
+                )
+        else:
+            consecutive_probe_failures = 0
+    return SidecarExitReceipt(
+        exit_reason="signal",
+        uptime_seconds=max(0.0, monotonic() - started_at),
+        consecutive_probe_failures=consecutive_probe_failures,
+    )
 
 
 class ShogunMcpServer(DccServerBase):
@@ -136,9 +202,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     start_server(port=args.mcp_port, host_pid=args.host_pid, sdk_path=args.sdk_path)
     try:
-        while not stopped.wait(1.0):
-            if not process_is_alive(args.host_pid):
-                break
+        receipt = monitor_host_liveness(args.host_pid, stopped=stopped)
+        logger.info(json.dumps(receipt.as_dict(), separators=(",", ":"), sort_keys=True))
     finally:
         stop_server()
 

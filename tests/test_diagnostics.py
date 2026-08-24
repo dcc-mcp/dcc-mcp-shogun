@@ -151,6 +151,38 @@ def test_invalid_environment_host_pid_is_typed_and_never_probed(monkeypatch):
     assert all(item.get("reason") == "invalid_host_pid" for item in report["steps"][3:])
 
 
+def test_doctor_distinguishes_indeterminate_host_probe(monkeypatch):
+    monkeypatch.setattr(diagnostics.sys, "platform", "win32")
+    monkeypatch.setattr(diagnostics, "_installed_version", lambda _name: "0.19.92")
+    monkeypatch.setattr(
+        diagnostics,
+        "process_is_alive",
+        lambda _pid: (_ for _ in ()).throw(OSError("sensitive probe detail")),
+    )
+
+    report = diagnostics.collect_diagnostics(mode="doctor", host_pid=42)
+    host_check = next(item for item in report["steps"] if item["id"] == "host_process")
+
+    assert host_check["observed"] == "indeterminate"
+    assert host_check["reason"] == "host_process_probe_failed"
+    assert report["failure_reason"] == "host_process_probe_failed"
+    assert "sensitive probe detail" not in json.dumps(report)
+
+
+def test_doctor_reports_confirmed_host_exit_separately(monkeypatch):
+    monkeypatch.setattr(diagnostics.sys, "platform", "win32")
+    monkeypatch.setattr(diagnostics, "_installed_version", lambda _name: "0.19.92")
+    monkeypatch.setattr(diagnostics, "process_is_alive", lambda _pid: False)
+
+    report = diagnostics.collect_diagnostics(mode="doctor", host_pid=42)
+    host_check = next(item for item in report["steps"] if item["id"] == "host_process")
+
+    assert host_check["observed"] == "exited"
+    assert host_check["reason"] == "host_process_exited"
+    assert report["failure_reason"] == "host_process_exited"
+    assert report["next_steps"][0]["id"] == "rebind_exact_host"
+
+
 def test_core_and_platform_floors_fail_before_host_probe(monkeypatch):
     monkeypatch.setattr(diagnostics.sys, "platform", "linux")
     monkeypatch.setattr(diagnostics, "_installed_version", lambda _name: "0.19.85")

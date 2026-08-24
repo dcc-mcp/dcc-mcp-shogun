@@ -145,11 +145,19 @@ other adapter uses them.
 Run the adapter on Windows. macOS and Linux runners can validate packaging but
 cannot become directly usable Shogun hosts.
 
-### `host_pid_required` or `host_process_unavailable`
+### `host_pid_required` or `host_process_exited`
 
 Start Shogun Post, obtain its exact positive PID, set
 `DCC_MCP_SHOGUN_HOST_PID`, and rerun doctor. The adapter intentionally performs
 no process-name scan or automatic rebinding.
+
+### `host_process_probe_failed`
+
+Retry diagnostics for the same exact PID. The sidecar tolerates two consecutive
+indeterminate probes and fails closed on the third; it never scans for or binds
+another process. Its structured exit telemetry contains only the reason,
+uptime, and consecutive failure count, without the PID, paths, or raw probe
+errors.
 
 ### `incompatible_core_version`
 

@@ -10,6 +10,7 @@ import socket
 import sys
 import time
 from ctypes import wintypes
+from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
@@ -22,6 +23,7 @@ DEFAULT_CONTROL_PORT_TIMEOUT_SECONDS = 120.0
 CONTROL_PORT_POLL_SECONDS = 1.0
 _PROCESS_SYNCHRONIZE = 0x00100000
 _ERROR_ACCESS_DENIED = 5
+_ERROR_INVALID_PARAMETER = 87
 _WAIT_OBJECT_0 = 0
 _WAIT_TIMEOUT = 258
 _WAIT_FAILED = 0xFFFFFFFF
@@ -70,6 +72,14 @@ class _FixedFileInfo(ctypes.Structure):
 
 class ShogunSdkError(RuntimeError):
     """Raised when the official Shogun Post SDK cannot be located or connected."""
+
+
+class ProcessLiveness(str, Enum):
+    """Result of probing one exact process id without discovering a replacement."""
+
+    ALIVE = "alive"
+    EXITED = "exited"
+    INDETERMINATE = "indeterminate"
 
 
 def _is_sdk_root(path: Path) -> bool:
@@ -265,23 +275,28 @@ def validate_control_port(port: int) -> Optional[Any]:
         return None
 
 
-def process_is_alive(pid: int) -> bool:
-    """Return whether one explicit process is still running.
+def probe_process_liveness(pid: int) -> ProcessLiveness:
+    """Probe one explicit process without scanning for or binding another process.
 
     Windows wait handles require SYNCHRONIZE access. A query-only handle makes
     WaitForSingleObject fail even while the target process is alive.
     """
     if pid <= 0:
-        return False
+        return ProcessLiveness.EXITED
     if os.name != "nt":
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
-            return False
+            return ProcessLiveness.EXITED
         except PermissionError:
-            return True
-        return True
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            return ProcessLiveness.ALIVE
+        except OSError:
+            return ProcessLiveness.INDETERMINATE
+        return ProcessLiveness.ALIVE
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    except OSError:
+        return ProcessLiveness.INDETERMINATE
     kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     kernel32.OpenProcess.restype = wintypes.HANDLE
     kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
@@ -291,21 +306,34 @@ def process_is_alive(pid: int) -> bool:
 
     handle = kernel32.OpenProcess(_PROCESS_SYNCHRONIZE, False, pid)
     if not handle:
-        return ctypes.get_last_error() == _ERROR_ACCESS_DENIED
+        error = ctypes.get_last_error()
+        if error == _ERROR_ACCESS_DENIED:
+            return ProcessLiveness.ALIVE
+        if error == _ERROR_INVALID_PARAMETER:
+            return ProcessLiveness.EXITED
+        return ProcessLiveness.INDETERMINATE
     try:
         wait_result = kernel32.WaitForSingleObject(handle, 0)
         if wait_result == _WAIT_TIMEOUT:
-            return True
+            return ProcessLiveness.ALIVE
         if wait_result == _WAIT_OBJECT_0:
-            return False
+            return ProcessLiveness.EXITED
         if wait_result == _WAIT_FAILED:
             error = ctypes.get_last_error()
             if error == _ERROR_ACCESS_DENIED:
-                return True
-            raise ShogunSdkError(f"Unable to inspect Shogun host process: Windows error {error}")
-        raise ShogunSdkError(f"Unable to inspect Shogun host process: wait result {wait_result}")
+                return ProcessLiveness.ALIVE
+            return ProcessLiveness.INDETERMINATE
+        return ProcessLiveness.INDETERMINATE
     finally:
         kernel32.CloseHandle(handle)
+
+
+def process_is_alive(pid: int) -> bool:
+    """Return whether one explicit process is alive, raising when the probe is uncertain."""
+    liveness = probe_process_liveness(pid)
+    if liveness is ProcessLiveness.INDETERMINATE:
+        raise ShogunSdkError("Unable to determine whether the Shogun host process is alive")
+    return liveness is ProcessLiveness.ALIVE
 
 
 def _control_port_timeout() -> float:

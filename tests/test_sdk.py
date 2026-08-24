@@ -14,6 +14,77 @@ def test_process_probe_observes_current_process():
     assert sdk.process_is_alive(os.getpid()) is True
 
 
+def test_process_probe_distinguishes_indeterminate_failure(monkeypatch):
+    monkeypatch.setattr(sdk.os, "name", "posix")
+    monkeypatch.setattr(
+        sdk.os,
+        "kill",
+        lambda _pid, _signal: (_ for _ in ()).throw(OSError("sensitive probe detail")),
+    )
+
+    assert sdk.probe_process_liveness(42) is sdk.ProcessLiveness.INDETERMINATE
+
+
+def test_process_probe_distinguishes_confirmed_exit(monkeypatch):
+    monkeypatch.setattr(sdk.os, "name", "posix")
+    monkeypatch.setattr(
+        sdk.os,
+        "kill",
+        lambda _pid, _signal: (_ for _ in ()).throw(ProcessLookupError()),
+    )
+
+    assert sdk.probe_process_liveness(42) is sdk.ProcessLiveness.EXITED
+
+
+def test_process_probe_reports_sustained_liveness(monkeypatch):
+    monkeypatch.setattr(sdk.os, "name", "posix")
+    monkeypatch.setattr(sdk.os, "kill", lambda _pid, _signal: None)
+
+    assert sdk.probe_process_liveness(42) is sdk.ProcessLiveness.ALIVE
+
+
+def test_windows_process_probe_setup_failure_is_indeterminate(monkeypatch):
+    monkeypatch.setattr(sdk.os, "name", "nt")
+    monkeypatch.setattr(
+        sdk.ctypes,
+        "WinDLL",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("sensitive setup detail")),
+        raising=False,
+    )
+
+    assert sdk.probe_process_liveness(42) is sdk.ProcessLiveness.INDETERMINATE
+
+
+@pytest.mark.parametrize(
+    ("windows_error", "expected"),
+    [
+        (sdk._ERROR_ACCESS_DENIED, sdk.ProcessLiveness.ALIVE),
+        (sdk._ERROR_INVALID_PARAMETER, sdk.ProcessLiveness.EXITED),
+        (123, sdk.ProcessLiveness.INDETERMINATE),
+    ],
+)
+def test_windows_open_process_errors_have_typed_liveness(monkeypatch, windows_error, expected):
+    class Call:
+        def __init__(self, result):
+            self.result = result
+            self.argtypes = None
+            self.restype = None
+
+        def __call__(self, *_args):
+            return self.result
+
+    kernel32 = types.SimpleNamespace(
+        OpenProcess=Call(0),
+        WaitForSingleObject=Call(sdk._WAIT_FAILED),
+        CloseHandle=Call(True),
+    )
+    monkeypatch.setattr(sdk.os, "name", "nt")
+    monkeypatch.setattr(sdk.ctypes, "WinDLL", lambda *_args, **_kwargs: kernel32, raising=False)
+    monkeypatch.setattr(sdk.ctypes, "get_last_error", lambda: windows_error, raising=False)
+
+    assert sdk.probe_process_liveness(42) is expected
+
+
 def _fake_sdk(root: Path) -> Path:
     root.mkdir()
     (root / "vicon_shogun_post.py").write_text("", encoding="utf-8")
