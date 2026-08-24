@@ -1,12 +1,48 @@
 from __future__ import annotations
 
+import importlib.util
+from pathlib import Path
 from threading import Event
 
 import pytest
+import yaml
 from dcc_mcp_core import InProcessCallableDispatcher
+from jsonschema import Draft202012Validator
 
 from dcc_mcp_shogun import runtime
 from dcc_mcp_shogun.sdk import ShogunSdkError
+
+
+def _pipeline_skill_module():
+    path = (
+        Path(__file__).parents[1]
+        / "src"
+        / "dcc_mcp_shogun"
+        / "skills"
+        / "shogun-pipeline"
+        / "scripts"
+        / "run_pipeline_command.py"
+    )
+    spec = importlib.util.spec_from_file_location("shogun_pipeline_skill", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _pipeline_output_validator():
+    manifest = (
+        Path(__file__).parents[1]
+        / "src"
+        / "dcc_mcp_shogun"
+        / "skills"
+        / "shogun-pipeline"
+        / "tools.yaml"
+    )
+    tool = yaml.safe_load(manifest.read_text(encoding="utf-8"))["tools"][0]
+    schema = tool["output_schema"]
+    Draft202012Validator.check_schema(schema)
+    return Draft202012Validator(schema)
 
 
 @pytest.fixture(autouse=True)
@@ -88,6 +124,7 @@ def test_pipeline_async_envelope_reaches_a_terminal_unverified_receipt(monkeypat
     monkeypatch.setenv(runtime.PIPELINE_ALLOWLIST_ENV, "studioPipeline")
     monkeypatch.setattr(runtime, "connect_client", lambda: client)
     dispatcher = InProcessCallableDispatcher()
+    pipeline_skill = _pipeline_skill_module()
 
     def record(outcome):
         outcomes.append(outcome)
@@ -95,7 +132,7 @@ def test_pipeline_async_envelope_reaches_a_terminal_unverified_receipt(monkeypat
 
     pending = dispatcher.submit_async_callable(
         "pipeline-request",
-        lambda: runtime.run_pipeline_command(**_arguments()),
+        lambda: pipeline_skill.main(**_arguments()),
         affinity="any",
         timeout_ms=1_800_000,
         on_complete=record,
@@ -109,9 +146,12 @@ def test_pipeline_async_envelope_reaches_a_terminal_unverified_receipt(monkeypat
     release.set()
     assert completed.wait(1.0)
     assert outcomes[0].ok is True
-    assert outcomes[0].value["host_acknowledged"] is True
-    assert outcomes[0].value["effects_verified"] is False
-    assert outcomes[0].value["verification_required"] is True
+    result = outcomes[0].value
+    assert result["success"] is True
+    assert result["context"]["host_acknowledged"] is True
+    assert result["context"]["effects_verified"] is False
+    assert result["context"]["verification_required"] is True
+    _pipeline_output_validator().validate(result)
 
 
 def test_pipeline_async_terminal_failure_does_not_replay(monkeypatch):
@@ -127,6 +167,7 @@ def test_pipeline_async_terminal_failure_does_not_replay(monkeypatch):
     monkeypatch.setenv(runtime.PIPELINE_ALLOWLIST_ENV, "studioPipeline")
     monkeypatch.setattr(runtime, "connect_client", lambda: client)
     dispatcher = InProcessCallableDispatcher()
+    pipeline_skill = _pipeline_skill_module()
 
     def record(outcome):
         outcomes.append(outcome)
@@ -134,14 +175,18 @@ def test_pipeline_async_terminal_failure_does_not_replay(monkeypatch):
 
     dispatcher.submit_async_callable(
         "pipeline-request",
-        lambda: runtime.run_pipeline_command(**_arguments()),
+        lambda: pipeline_skill.main(**_arguments()),
         affinity="any",
         on_complete=record,
     )
 
     assert completed.wait(1.0)
-    assert outcomes[0].ok is False
-    assert outcomes[0].error.startswith("ShogunSdkError:")
+    assert outcomes[0].ok is True
+    result = outcomes[0].value
+    assert result["success"] is False
+    assert result["error"] == "ShogunSdkError"
+    assert result["context"] == {"error_type": "ShogunSdkError"}
+    _pipeline_output_validator().validate(result)
     assert len(client.calls) == 1
 
 

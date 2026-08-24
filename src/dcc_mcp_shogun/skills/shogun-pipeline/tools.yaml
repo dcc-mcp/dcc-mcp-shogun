@@ -32,50 +32,83 @@ tools:
         label_threshold: {type: number, minimum: 0, maximum: 1000000}
       additionalProperties: false
     output_schema:
-      type: object
-      required:
-        - receipt_version
-        - command_name
-        - parameters
-        - host_acknowledged
-        - host_result_reported
-        - effects_verified
-        - verification_required
-      properties:
-        receipt_version: {type: string, const: "1.0"}
-        command_name:
-          type: string
-          minLength: 1
-          maxLength: 64
-          pattern: "^[A-Za-z_][A-Za-z0-9_]*$"
-        parameters:
-          type: object
-          required:
-            - load_type
-            - processing_mode
-            - export_c3d
-            - export_fbx
-            - fill_gap_mode
-            - fill_gap_width
-            - filter_cutoff
-            - filter_threshold
-            - label_threshold
+      $schema: https://json-schema.org/draft/2020-12/schema
+      oneOf:
+        - type: object
+          required: [success, message, prompt, error, context]
           properties:
-            load_type: {type: integer, minimum: 0, maximum: 3}
-            processing_mode: {type: string, enum: [traditional, model]}
-            export_c3d: {type: boolean}
-            export_fbx: {type: boolean}
-            fill_gap_mode: {type: string, enum: [disabled, rigid, labeling_constraint]}
-            fill_gap_width: {type: integer, minimum: 0, maximum: 10000}
-            filter_cutoff: {type: number, minimum: 0, maximum: 1000000}
-            filter_threshold: {type: number, minimum: 0, maximum: 1000000}
-            label_threshold: {type: number, minimum: 0, maximum: 1000000}
+            success: {type: boolean, const: true}
+            message: {type: string}
+            prompt: {type: [string, "null"]}
+            error: {type: "null"}
+            context:
+              type: object
+              required:
+                - receipt_version
+                - command_name
+                - parameters
+                - host_acknowledged
+                - host_result_reported
+                - effects_verified
+                - verification_required
+              properties:
+                receipt_version: {type: string, const: "1.0"}
+                command_name:
+                  type: string
+                  minLength: 1
+                  maxLength: 64
+                  pattern: "^[A-Za-z_][A-Za-z0-9_]*$"
+                parameters:
+                  type: object
+                  required:
+                    - load_type
+                    - processing_mode
+                    - export_c3d
+                    - export_fbx
+                    - fill_gap_mode
+                    - fill_gap_width
+                    - filter_cutoff
+                    - filter_threshold
+                    - label_threshold
+                  properties:
+                    load_type: {type: integer, minimum: 0, maximum: 3}
+                    processing_mode: {type: string, enum: [traditional, model]}
+                    export_c3d: {type: boolean}
+                    export_fbx: {type: boolean}
+                    fill_gap_mode: {type: string, enum: [disabled, rigid, labeling_constraint]}
+                    fill_gap_width: {type: integer, minimum: 0, maximum: 10000}
+                    filter_cutoff: {type: number, minimum: 0, maximum: 1000000}
+                    filter_threshold: {type: number, minimum: 0, maximum: 1000000}
+                    label_threshold: {type: number, minimum: 0, maximum: 1000000}
+                  additionalProperties: false
+                host_acknowledged: {type: boolean}
+                host_result_reported: {type: boolean}
+                effects_verified: {type: boolean, const: false}
+                verification_required: {type: boolean, const: true}
+              additionalProperties: false
           additionalProperties: false
-        host_acknowledged: {type: boolean}
-        host_result_reported: {type: boolean}
-        effects_verified: {type: boolean, const: false}
-        verification_required: {type: boolean, const: true}
-      additionalProperties: false
+        - type: object
+          required: [success, message, prompt, error, context]
+          properties:
+            success: {type: boolean, const: false}
+            message: {type: string}
+            prompt: {type: [string, "null"]}
+            error:
+              type: string
+              minLength: 1
+              maxLength: 128
+              pattern: "^[A-Za-z_][A-Za-z0-9_]*$"
+            context:
+              type: object
+              required: [error_type]
+              properties:
+                error_type:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                  pattern: "^[A-Za-z_][A-Za-z0-9_]*$"
+              additionalProperties: false
+          additionalProperties: false
     execution: async
     job_strategy: monolithic
     affinity: any
