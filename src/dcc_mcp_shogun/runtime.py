@@ -1731,10 +1731,13 @@ def run_pipeline_command(
         raise ShogunSdkError("The host returned an invalid HSL result")
 
     return {
+        "receipt_version": "1.0",
         "command_name": command,
         "parameters": normalized,
         "host_acknowledged": True,
         "host_result_reported": bool(result.strip()),
+        "effects_verified": False,
+        "verification_required": True,
     }
 
 

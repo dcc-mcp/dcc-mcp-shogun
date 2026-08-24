@@ -105,12 +105,40 @@ def test_skills_keep_read_and_mutation_boundaries_explicit():
 
     pipeline_skill = (root / "shogun-pipeline" / "tools.yaml").read_text(encoding="utf-8")
     assert pipeline_skill.count("  - name:") == 1
-    assert pipeline_skill.count("additionalProperties: false") == 1
+    assert pipeline_skill.count("additionalProperties: false") == 6
     assert pipeline_skill.count("destructive_hint: true") == 1
     assert "hsl_source" not in pipeline_skill
     assert "script_path" not in pipeline_skill
+    for required_field in (
+        "receipt_version",
+        "command_name",
+        "parameters",
+        "host_acknowledged",
+        "host_result_reported",
+        "effects_verified",
+        "verification_required",
+    ):
+        assert f"                - {required_field}" in pipeline_skill
+    assert "$schema: https://json-schema.org/draft/2020-12/schema" in pipeline_skill
+    assert "oneOf:" in pipeline_skill
+    assert pipeline_skill.count("required: [success, message, prompt, error, context]") == 2
+    assert "success: {type: boolean, const: true}" in pipeline_skill
+    assert "success: {type: boolean, const: false}" in pipeline_skill
+    assert "required: [error_type]" in pipeline_skill
+    assert "output_schema: {type: object}" not in pipeline_skill
 
     pipeline_instructions = (root / "shogun-pipeline" / "SKILL.md").read_text(encoding="utf-8")
+    for contract_term in (
+        "jobs_get_status",
+        "include_result",
+        "--wait-timeout-secs 1800",
+        "600 seconds",
+        "interrupted",
+        "unknown effect",
+        "must not be replayed",
+    ):
+        assert contract_term in pipeline_instructions
+
     for contract_term in (
         "DCC_MCP_SHOGUN_PIPELINE_ABI",
         "fixed9-v1",
