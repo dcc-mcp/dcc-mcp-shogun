@@ -11,7 +11,7 @@ metadata:
     dcc: shogun
     layer: domain
     compatibility: "Python 3.9+; capability-gated Vicon Shogun Post 1.19 SDK"
-    version: "0.10.0" # x-release-please-version
+    version: "0.11.0" # x-release-please-version
     tags: [motion-capture, animation, vicon, clips, qa]
     search-hint: >-
       Vicon Shogun Post clips active clip NLE timing SMPTE character shot QA
