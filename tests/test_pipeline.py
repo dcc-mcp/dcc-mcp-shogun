@@ -6,6 +6,11 @@ from dcc_mcp_shogun import runtime
 from dcc_mcp_shogun.sdk import ShogunSdkError
 
 
+@pytest.fixture(autouse=True)
+def _fixed_pipeline_abi(monkeypatch):
+    monkeypatch.setenv("DCC_MCP_SHOGUN_PIPELINE_ABI", "fixed9-v1")
+
+
 class FakeClient:
     def __init__(self, result: str = "") -> None:
         self.result = result
@@ -66,6 +71,38 @@ def test_pipeline_has_no_commands_enabled_by_default(monkeypatch):
 
     with pytest.raises(ShogunSdkError, match="No pipeline commands"):
         runtime.run_pipeline_command(**_arguments())
+
+
+@pytest.mark.parametrize("abi", (None, "fixed9-v2", "pipeline_processer"))
+def test_pipeline_requires_explicit_fixed9_v1_abi_before_connect(monkeypatch, abi):
+    monkeypatch.setenv(runtime.PIPELINE_ALLOWLIST_ENV, "studioPipeline")
+    if abi is None:
+        monkeypatch.delenv("DCC_MCP_SHOGUN_PIPELINE_ABI", raising=False)
+    else:
+        monkeypatch.setenv("DCC_MCP_SHOGUN_PIPELINE_ABI", abi)
+    monkeypatch.setattr(runtime, "connect_client", lambda: pytest.fail("must not connect"))
+
+    with pytest.raises(ShogunSdkError, match="pipeline command ABI"):
+        runtime.run_pipeline_command(**_arguments())
+
+
+def test_pipeline_policy_reports_only_bounded_abi_attestation(monkeypatch):
+    monkeypatch.setenv(runtime.PIPELINE_ALLOWLIST_ENV, "studioPipeline")
+    monkeypatch.setenv("DCC_MCP_SHOGUN_PIPELINE_ABI", "secret-unsupported-value")
+
+    receipt = runtime.pipeline_policy_receipt("studioPipeline")
+
+    assert receipt == {
+        "configured": True,
+        "valid": True,
+        "command_count": 1,
+        "restart_required": True,
+        "requested_command_enabled": True,
+        "abi_configured": True,
+        "abi_valid": False,
+        "abi_version": None,
+    }
+    assert "secret-unsupported-value" not in repr(receipt)
 
 
 def test_pipeline_rejects_unallowlisted_or_injectable_command_before_connect(monkeypatch):

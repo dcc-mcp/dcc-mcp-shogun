@@ -35,6 +35,9 @@ def test_verify_reports_directly_usable_without_sensitive_bindings(monkeypatch, 
         "valid": True,
         "command_count": 0,
         "restart_required": True,
+        "abi_configured": False,
+        "abi_valid": False,
+        "abi_version": None,
     }
     serialized = json.dumps(report)
     assert "42" not in serialized
@@ -62,6 +65,9 @@ def test_verify_reports_requested_pipeline_membership_without_command_names(monk
         "command_count": 2,
         "restart_required": True,
         "requested_command_enabled": True,
+        "abi_configured": False,
+        "abi_valid": False,
+        "abi_version": None,
     }
     serialized = json.dumps(report)
     assert "studioPipeline" not in serialized
@@ -83,6 +89,9 @@ def test_verify_reports_invalid_pipeline_policy_without_gating_adapter(monkeypat
         "valid": False,
         "command_count": 1,
         "restart_required": True,
+        "abi_configured": False,
+        "abi_valid": False,
+        "abi_version": None,
     }
     assert "DeleteAllKeys" not in json.dumps(report)
 
@@ -101,6 +110,9 @@ def test_verify_distinguishes_oversized_pipeline_policy_by_bounded_count(monkeyp
         "valid": False,
         "command_count": 33,
         "restart_required": True,
+        "abi_configured": False,
+        "abi_valid": False,
+        "abi_version": None,
     }
     assert "pipeline0" not in json.dumps(report)
 

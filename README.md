@@ -190,8 +190,11 @@ The DCC-MCP listener uses an OS-assigned loopback port unless `--mcp-port` or
 Custom production pipelines are disabled by default. To enable the fixed typed
 pipeline bridge, set `DCC_MCP_SHOGUN_PIPELINE_ALLOWLIST` before starting the
 adapter to a comma-separated list of exact host-installed HSL command
-identifiers. The setting grants access only to those identifiers; it does not
-accept HSL source, paths, or command fragments.
+identifiers. Also set `DCC_MCP_SHOGUN_PIPELINE_ABI=fixed9-v1` to attest that
+each command implements the fixed positional contract. No-argument scripts
+require a separately audited host wrapper and are not directly compatible. The
+settings grant access only to those identifiers; they do not accept HSL source,
+paths, or command fragments.
 
 Use `dcc-mcp-shogun verify --pipeline-command <COMMAND> --json` to check one
 identifier before a destructive call. The non-gating `pipeline_policy` receipt
