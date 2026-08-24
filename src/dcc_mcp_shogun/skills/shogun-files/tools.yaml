@@ -46,24 +46,48 @@ tools:
         overwrite: {type: boolean, default: false}
       additionalProperties: false
     output_schema:
-      type: object
-      required: [success, message, prompt, error, context]
-      properties:
-        success: {type: boolean, const: true}
-        message: {type: string}
-        prompt: {type: [string, "null"]}
-        error: {type: "null"}
-        context:
-          type: object
-          required: [receipt_version, file_name, file_size_bytes, sha256, active_scene_changed]
+      $schema: https://json-schema.org/draft/2020-12/schema
+      oneOf:
+        - type: object
+          required: [success, message, prompt, error, context]
           properties:
-            receipt_version: {type: integer, const: 1}
-            file_name: {type: string, minLength: 1, maxLength: 4096}
-            file_size_bytes: {type: integer, minimum: 1}
-            sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
-            active_scene_changed: {type: boolean}
+            success: {type: boolean, const: true}
+            message: {type: string}
+            prompt: {type: [string, "null"]}
+            error: {type: "null"}
+            context:
+              type: object
+              required: [receipt_version, file_name, file_size_bytes, sha256, active_scene_changed]
+              properties:
+                receipt_version: {type: integer, const: 1}
+                file_name: {type: string, minLength: 1, maxLength: 4096}
+                file_size_bytes: {type: integer, minimum: 1}
+                sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+                active_scene_changed: {type: boolean}
+              additionalProperties: false
           additionalProperties: false
-      additionalProperties: false
+        - type: object
+          required: [success, message, prompt, error, context]
+          properties:
+            success: {type: boolean, const: false}
+            message: {type: string}
+            prompt: {type: [string, "null"]}
+            error:
+              type: string
+              minLength: 1
+              maxLength: 128
+              pattern: "^[A-Za-z_][A-Za-z0-9_]*$"
+            context:
+              type: object
+              required: [error_type]
+              properties:
+                error_type:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                  pattern: "^[A-Za-z_][A-Za-z0-9_]*$"
+              additionalProperties: false
+          additionalProperties: false
     execution: async
     job_strategy: monolithic
     affinity: any

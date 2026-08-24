@@ -25,7 +25,14 @@ classifiers = [
 dependencies = ["dcc-mcp-core>=0.19.86,<1.0.0"]
 
 [project.optional-dependencies]
-dev = ["build>=1.2", "pytest>=8", "ruff>=0.8", "twine>=6"]
+dev = [
+  "build>=1.2",
+  "jsonschema>=4.18",
+  "pytest>=8",
+  "PyYAML>=6.0",
+  "ruff>=0.8",
+  "twine>=6",
+]
 
 [project.scripts]
 dcc-mcp-shogun = "dcc_mcp_shogun.server:main"

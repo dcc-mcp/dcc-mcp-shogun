@@ -76,15 +76,18 @@ def test_skills_keep_read_and_mutation_boundaries_explicit():
     save_scene_contract = files_skill.split("  - name: save_scene", 1)[1].split(
         "  - name: export_motion", 1
     )[0]
-    assert "output_schema:\n      type: object" in save_scene_contract
-    assert "required: [success, message, prompt, error, context]" in save_scene_contract
+    assert "$schema: https://json-schema.org/draft/2020-12/schema" in save_scene_contract
+    assert "oneOf:" in save_scene_contract
+    assert save_scene_contract.count("required: [success, message, prompt, error, context]") == 2
     assert (
         "required: [receipt_version, file_name, file_size_bytes, sha256, active_scene_changed]"
         in save_scene_contract
     )
     assert "success: {type: boolean, const: true}" in save_scene_contract
+    assert "success: {type: boolean, const: false}" in save_scene_contract
     assert 'error: {type: "null"}' in save_scene_contract
-    assert "context:\n          type: object" in save_scene_contract
+    assert "required: [error_type]" in save_scene_contract
+    assert 'pattern: "^[A-Za-z_][A-Za-z0-9_]*$"' in save_scene_contract
     assert "receipt_version: {type: integer, const: 1}" in save_scene_contract
     assert 'sha256: {type: string, pattern: "^[0-9a-f]{64}$"}' in save_scene_contract
     assert "active_scene_changed: {type: boolean}" in save_scene_contract

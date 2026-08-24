@@ -3,6 +3,10 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+import yaml
+from jsonschema import Draft202012Validator
+
 
 def _result_module():
     path = (
@@ -19,6 +23,21 @@ def _result_module():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def _save_scene_output_validator():
+    manifest = (
+        Path(__file__).parents[1]
+        / "src"
+        / "dcc_mcp_shogun"
+        / "skills"
+        / "shogun-files"
+        / "tools.yaml"
+    )
+    tools = yaml.safe_load(manifest.read_text(encoding="utf-8"))["tools"]
+    schema = next(tool["output_schema"] for tool in tools if tool["name"] == "save_scene")
+    Draft202012Validator.check_schema(schema)
+    return Draft202012Validator(schema)
 
 
 def test_safe_result_redacts_exception_details():
@@ -51,3 +70,23 @@ def test_safe_result_nests_recovery_receipt_in_standard_context():
         "error": None,
         "context": receipt,
     }
+    _save_scene_output_validator().validate(result)
+
+
+@pytest.mark.parametrize(
+    "error",
+    (
+        FileExistsError("recovery.vdf"),
+        RuntimeError("Shogun did not create the requested scene file"),
+        RuntimeError("Shogun created an empty scene file"),
+    ),
+)
+def test_save_scene_output_schema_accepts_redacted_failure_envelopes(error):
+    def fail():
+        raise error
+
+    result = _result_module().safe_result("unused", fail)
+
+    assert result["success"] is False
+    assert result["error"] == type(error).__name__
+    _save_scene_output_validator().validate(result)
