@@ -193,6 +193,12 @@ adapter to a comma-separated list of exact host-installed HSL command
 identifiers. The setting grants access only to those identifiers; it does not
 accept HSL source, paths, or command fragments.
 
+Use `dcc-mcp-shogun verify --pipeline-command <COMMAND> --json` to check one
+identifier before a destructive call. The non-gating `pipeline_policy` receipt
+reports only configuration validity, command count, restart requirements, and
+the requested membership result; it never returns command names or environment
+contents. Policy changes still require restarting the adapter.
+
 ## Validation
 
 ```powershell

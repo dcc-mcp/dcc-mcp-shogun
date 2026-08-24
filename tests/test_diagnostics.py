@@ -21,6 +21,7 @@ def _successful_host(monkeypatch, tmp_path):
 
 def test_verify_reports_directly_usable_without_sensitive_bindings(monkeypatch, tmp_path):
     _successful_host(monkeypatch, tmp_path)
+    monkeypatch.delenv("DCC_MCP_SHOGUN_PIPELINE_ALLOWLIST", raising=False)
 
     report = diagnostics.collect_diagnostics(mode="verify", host_pid=42, sdk_path=tmp_path)
 
@@ -29,10 +30,79 @@ def test_verify_reports_directly_usable_without_sensitive_bindings(monkeypatch, 
     assert report["failure_stage"] is None
     assert report["verify"]["checks_passed"] == report["verify"]["checks_total"] == 8
     assert {item["status"] for item in report["steps"]} == {"ok"}
+    assert report["pipeline_policy"] == {
+        "configured": False,
+        "valid": True,
+        "command_count": 0,
+        "restart_required": True,
+    }
     serialized = json.dumps(report)
     assert "42" not in serialized
     assert str(tmp_path) not in serialized
     assert "803" not in serialized
+
+
+def test_verify_reports_requested_pipeline_membership_without_command_names(monkeypatch, tmp_path):
+    _successful_host(monkeypatch, tmp_path)
+    monkeypatch.setenv(
+        "DCC_MCP_SHOGUN_PIPELINE_ALLOWLIST",
+        "otherCommand, studioPipeline",
+    )
+
+    report = diagnostics.collect_diagnostics(
+        mode="verify",
+        host_pid=42,
+        sdk_path=tmp_path,
+        pipeline_command="studioPipeline",
+    )
+
+    assert report["pipeline_policy"] == {
+        "configured": True,
+        "valid": True,
+        "command_count": 2,
+        "restart_required": True,
+        "requested_command_enabled": True,
+    }
+    serialized = json.dumps(report)
+    assert "studioPipeline" not in serialized
+    assert "otherCommand" not in serialized
+
+
+def test_verify_reports_invalid_pipeline_policy_without_gating_adapter(monkeypatch, tmp_path):
+    _successful_host(monkeypatch, tmp_path)
+    monkeypatch.setenv(
+        "DCC_MCP_SHOGUN_PIPELINE_ALLOWLIST",
+        "studioPipeline;DeleteAllKeys",
+    )
+
+    report = diagnostics.collect_diagnostics(mode="verify", host_pid=42, sdk_path=tmp_path)
+
+    assert report["directly_usable"] is True
+    assert report["pipeline_policy"] == {
+        "configured": True,
+        "valid": False,
+        "command_count": 1,
+        "restart_required": True,
+    }
+    assert "DeleteAllKeys" not in json.dumps(report)
+
+
+def test_verify_distinguishes_oversized_pipeline_policy_by_bounded_count(monkeypatch, tmp_path):
+    _successful_host(monkeypatch, tmp_path)
+    monkeypatch.setenv(
+        "DCC_MCP_SHOGUN_PIPELINE_ALLOWLIST",
+        ",".join(f"pipeline{index}" for index in range(33)),
+    )
+
+    report = diagnostics.collect_diagnostics(mode="verify", host_pid=42, sdk_path=tmp_path)
+
+    assert report["pipeline_policy"] == {
+        "configured": True,
+        "valid": False,
+        "command_count": 33,
+        "restart_required": True,
+    }
+    assert "pipeline0" not in json.dumps(report)
 
 
 def test_doctor_requires_an_explicit_host_binding(monkeypatch):
@@ -154,3 +224,29 @@ def test_cli_success_exit_code(monkeypatch, capsys):
 
     assert diagnostics.run_cli(["verify"]) == 0
     assert "directly_usable: true" in capsys.readouterr().out
+
+
+def test_cli_accepts_bounded_pipeline_membership_query(monkeypatch, capsys):
+    captured = {}
+
+    def collect(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "ok",
+            "directly_usable": True,
+            "pipeline_policy": {
+                "configured": True,
+                "valid": True,
+                "command_count": 1,
+                "restart_required": True,
+                "requested_command_enabled": True,
+            },
+            "steps": [],
+            "next_steps": [],
+        }
+
+    monkeypatch.setattr(diagnostics, "collect_diagnostics", collect)
+
+    assert diagnostics.run_cli(["verify", "--pipeline-command", "studioPipeline", "--json"]) == 0
+    assert captured["pipeline_command"] == "studioPipeline"
+    assert "studioPipeline" not in capsys.readouterr().out
