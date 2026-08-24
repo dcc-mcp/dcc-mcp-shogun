@@ -51,8 +51,17 @@ whether the host call returned and whether a result was present; it does not
 expose the result text or claim that custom scene effects were verified. Follow
 with the narrowest applicable typed scene inspection tool.
 
-The async `timeout_hint_secs: 1800` value is a scheduling hint for a potentially
-long pipeline operation. It is not a hard HSL execution deadline, a sidecar
-lease, or a promise that jobs survive an adapter or gateway restart. Keep the
-exact Shogun host process and its adapter sidecar running, poll the Core-owned
-job status, and verify the scene afterward.
+This tool is asynchronous and monolithic. Its first response is a Core-owned
+pending job receipt. Keep the exact Shogun host process and its adapter sidecar
+running, retain the Core job ID, and poll `jobs_get_status` with
+`include_result: true` until the job is terminal. A completed Core job means the
+worker stopped; it does not by itself mean the nested Shogun operation succeeded.
+Inspect the nested Skill result for success or a bounded error, then perform the
+typed scene or artifact verification required by the command.
+
+The 1800-second timeout hint is scheduling metadata, not a cancellable HSL
+deadline or a sidecar lifetime guarantee. The CLI wait default is 600 seconds;
+for an expected 30-minute call, use `--wait-timeout-secs 1800` or poll the saved
+job ID separately. If the sidecar stops, the job becomes `interrupted` and the
+scene may have an unknown effect. This destructive, non-idempotent operation
+must not be replayed automatically after a timeout, disconnect, or restart.
