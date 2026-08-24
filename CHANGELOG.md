@@ -11,6 +11,21 @@
 - Add ROM labeling, subject calibration, QuickPost, and expanded processing
   settings from the official `Offline` interface.
 
+## [0.11.0](https://github.com/dcc-mcp/dcc-mcp-shogun/compare/v0.10.0...v0.11.0) (2026-08-24)
+
+
+### Features
+
+* add pipeline policy diagnostics ([#38](https://github.com/dcc-mcp/dcc-mcp-shogun/issues/38)) ([51d2076](https://github.com/dcc-mcp/dcc-mcp-shogun/commit/51d2076669130606aa67a6774f972a38c68539a5))
+* add verifiable recovery receipt ([#39](https://github.com/dcc-mcp/dcc-mcp-shogun/issues/39)) ([33fb881](https://github.com/dcc-mcp/dcc-mcp-shogun/commit/33fb8815699ae32900d08a49d8fede1a6faa5cdb))
+* define pipeline lifecycle receipts ([#37](https://github.com/dcc-mcp/dcc-mcp-shogun/issues/37)) ([23a0949](https://github.com/dcc-mcp/dcc-mcp-shogun/commit/23a09497d084bba17ad6122792da26e6d240fd6c))
+
+
+### Bug Fixes
+
+* harden sidecar liveness monitoring ([#40](https://github.com/dcc-mcp/dcc-mcp-shogun/issues/40)) ([230c267](https://github.com/dcc-mcp/dcc-mcp-shogun/commit/230c267e9392c8f374825e7c1fcf03905fcc4999))
+* require an explicit pipeline ABI ([#41](https://github.com/dcc-mcp/dcc-mcp-shogun/issues/41)) ([b73a11f](https://github.com/dcc-mcp/dcc-mcp-shogun/commit/b73a11f0249b82676e1ca7ccbafde8214717e164))
+
 ## [0.10.0](https://github.com/dcc-mcp/dcc-mcp-shogun/compare/v0.9.0...v0.10.0) (2026-08-23)
 
 
