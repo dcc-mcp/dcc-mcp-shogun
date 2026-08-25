@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
+
+import yaml
 
 from dcc_mcp_shogun import __version__
 from dcc_mcp_shogun.server import ShogunMcpServer, _parse_args
@@ -16,6 +19,41 @@ def test_version_metadata_is_synchronized():
     ).read_text(encoding="utf-8")
     manifest = json.loads((root / ".release-please-manifest.json").read_text(encoding="utf-8"))
     assert manifest["."] == __version__
+
+
+def test_uv_lock_root_version_matches_release_metadata():
+    root = Path(__file__).parents[1]
+    lock = (root / "uv.lock").read_text(encoding="utf-8")
+    editable_root_versions = []
+    for package in lock.split("[[package]]"):
+        if 'name = "dcc-mcp-shogun"' not in package:
+            continue
+        if 'source = { editable = "." }' not in package:
+            continue
+        version = re.search(r'^version = "([^"]+)"$', package, re.MULTILINE)
+        assert version is not None
+        editable_root_versions.append(version.group(1))
+
+    assert editable_root_versions == [__version__]
+
+
+def test_ci_fails_closed_when_uv_lock_is_stale():
+    root = Path(__file__).parents[1]
+    workflow = yaml.safe_load((root / ".github" / "workflows" / "ci.yml").read_text())
+    steps = workflow["jobs"]["test"]["steps"]
+
+    setup_indexes = [
+        index for index, step in enumerate(steps) if step.get("uses") == "astral-sh/setup-uv@v10"
+    ]
+    check_indexes = [
+        index
+        for index, step in enumerate(steps)
+        if step.get("run") == "uv lock --check" and not step.get("continue-on-error", False)
+    ]
+
+    assert len(setup_indexes) == 1
+    assert len(check_indexes) == 1
+    assert setup_indexes[0] < check_indexes[0]
 
 
 def test_bundled_skills_exist():
