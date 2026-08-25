@@ -41,19 +41,27 @@ def test_ci_fails_closed_when_uv_lock_is_stale():
     root = Path(__file__).parents[1]
     workflow = yaml.safe_load((root / ".github" / "workflows" / "ci.yml").read_text())
     steps = workflow["jobs"]["test"]["steps"]
+    setup_uv_ref = "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d"
 
-    setup_indexes = [
-        index for index, step in enumerate(steps) if step.get("uses") == "astral-sh/setup-uv@v10"
+    checkout_indexes = [
+        index for index, step in enumerate(steps) if step.get("uses") == "actions/checkout@v6"
     ]
+    setup_indexes = [index for index, step in enumerate(steps) if step.get("uses") == setup_uv_ref]
     check_indexes = [
         index
         for index, step in enumerate(steps)
         if step.get("run") == "uv lock --check" and not step.get("continue-on-error", False)
     ]
+    python_indexes = [
+        index for index, step in enumerate(steps) if step.get("uses") == "actions/setup-python@v6"
+    ]
 
+    assert workflow["permissions"] == {"contents": "read"}
+    assert len(checkout_indexes) == 1
     assert len(setup_indexes) == 1
     assert len(check_indexes) == 1
-    assert setup_indexes[0] < check_indexes[0]
+    assert len(python_indexes) == 1
+    assert checkout_indexes[0] < setup_indexes[0] < check_indexes[0] < python_indexes[0]
 
 
 def test_bundled_skills_exist():
