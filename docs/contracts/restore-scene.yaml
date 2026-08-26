@@ -1,0 +1,233 @@
+contract_version: "1.0"
+status: proposed-design-only
+implementation_authorized: false
+
+operation:
+  name: restore_scene
+  destructive: true
+  idempotent: false
+  single_use: true
+  replay_allowed: false
+  route: official_sdk_only
+
+prohibited_routes: [arbitrary_hsl, python, ui_automation]
+
+preconditions:
+  - canonical_target_is_contained_by_canonical_trusted_root
+  - target_is_regular_vdf_without_symlink_or_reparse_escape
+  - target_basename_size_and_sha256_match_recovery_receipt
+  - recovery_receipt_reports_active_scene_unchanged
+  - operator_confirmation_is_fresh_exact_scope_and_unused
+
+terminal_rules:
+  poll_only_after_dispatch: true
+  mutation_retry_allowed: false
+  timeout_state: timed_out
+  unknown_state: indeterminate
+  timeout_or_unknown_effect: unknown
+
+real_host_acceptance:
+  authorized_by_this_contract: false
+  requires_disposable_marked_take: true
+  requires_explicit_approved_path_scope: true
+  requires_separate_operator_authorization: true
+
+input_schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  $id: https://github.com/dcc-mcp/dcc-mcp-shogun/docs/contracts/restore-scene-input.schema.json
+  title: Proposed recovery-scene restore request
+  type: object
+  required:
+    - request_id
+    - trusted_root
+    - file_path
+    - recovery_receipt
+    - operator_confirmation
+  properties:
+    request_id:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    trusted_root:
+      type: string
+      minLength: 3
+      maxLength: 4096
+      pattern: "^[A-Za-z]:[\\\\/].+"
+    file_path:
+      type: string
+      minLength: 7
+      maxLength: 4096
+      pattern: "^[A-Za-z]:[\\\\/].+\\.[vV][dD][fF]$"
+    recovery_receipt:
+      type: object
+      required:
+        - receipt_version
+        - file_name
+        - file_size_bytes
+        - sha256
+        - active_scene_changed
+      properties:
+        receipt_version: {type: integer, const: 1}
+        file_name:
+          type: string
+          minLength: 5
+          maxLength: 255
+          pattern: "^[^/\\\\]+\\.[vV][dD][fF]$"
+        file_size_bytes: {type: integer, minimum: 1}
+        sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+        active_scene_changed: {type: boolean, const: false}
+      additionalProperties: false
+    operator_confirmation:
+      type: object
+      required:
+        - confirmation_id
+        - scope
+        - destructive_acknowledged
+        - non_idempotent_acknowledged
+      properties:
+        confirmation_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        scope: {type: string, const: exact_request_and_path}
+        destructive_acknowledged: {type: boolean, const: true}
+        non_idempotent_acknowledged: {type: boolean, const: true}
+      additionalProperties: false
+  additionalProperties: false
+
+output_schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  $id: https://github.com/dcc-mcp/dcc-mcp-shogun/docs/contracts/restore-scene-output.schema.json
+  title: Proposed recovery-scene restore terminal result
+  $defs:
+    scene_receipt:
+      type: object
+      required: [observed_via, file_name, scene_identity_sha256]
+      properties:
+        observed_via: {type: string, const: official_sdk}
+        file_name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: "^[^/\\\\]+$"
+        scene_identity_sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+      additionalProperties: false
+    succeeded_context:
+      type: object
+      required:
+        - receipt_version
+        - request_id
+        - state
+        - effect
+        - replay_allowed
+        - before_receipt
+        - after_receipt
+      properties:
+        receipt_version: {type: string, const: "1.0"}
+        request_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        state: {type: string, const: succeeded}
+        effect: {type: string, const: verified}
+        replay_allowed: {type: boolean, const: false}
+        before_receipt: {$ref: "#/$defs/scene_receipt"}
+        after_receipt: {$ref: "#/$defs/scene_receipt"}
+      additionalProperties: false
+    failed_context:
+      type: object
+      required:
+        - receipt_version
+        - request_id
+        - state
+        - effect
+        - replay_allowed
+        - before_receipt
+        - after_receipt
+      properties:
+        receipt_version: {type: string, const: "1.0"}
+        request_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        state: {type: string, const: failed}
+        effect: {type: string, enum: [unchanged, unknown]}
+        replay_allowed: {type: boolean, const: false}
+        before_receipt: {$ref: "#/$defs/scene_receipt"}
+        after_receipt:
+          oneOf:
+            - {$ref: "#/$defs/scene_receipt"}
+            - {type: "null"}
+      additionalProperties: false
+    unknown_effect_context:
+      type: object
+      required:
+        - receipt_version
+        - request_id
+        - state
+        - effect
+        - replay_allowed
+        - before_receipt
+        - after_receipt
+      properties:
+        receipt_version: {type: string, const: "1.0"}
+        request_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        state: {type: string, enum: [timed_out, indeterminate]}
+        effect: {type: string, const: unknown}
+        replay_allowed: {type: boolean, const: false}
+        before_receipt: {$ref: "#/$defs/scene_receipt"}
+        after_receipt: {type: "null"}
+      additionalProperties: false
+  oneOf:
+    - type: object
+      required: [success, message, prompt, error, context]
+      properties:
+        success: {type: boolean, const: true}
+        message: {type: string}
+        prompt: {type: [string, "null"]}
+        error: {type: "null"}
+        context: {$ref: "#/$defs/succeeded_context"}
+      additionalProperties: false
+    - type: object
+      required: [success, message, prompt, error, context]
+      properties:
+        success: {type: boolean, const: false}
+        message: {type: string}
+        prompt: {type: [string, "null"]}
+        error: {type: string, const: RestoreFailed}
+        context: {$ref: "#/$defs/failed_context"}
+      additionalProperties: false
+    - type: object
+      required: [success, message, prompt, error, context]
+      properties:
+        success: {type: boolean, const: false}
+        message: {type: string}
+        prompt: {type: [string, "null"]}
+        error: {type: string, const: RestoreTimedOut}
+        context:
+          allOf:
+            - {$ref: "#/$defs/unknown_effect_context"}
+            - properties:
+                state: {type: string, const: timed_out}
+      additionalProperties: false
+    - type: object
+      required: [success, message, prompt, error, context]
+      properties:
+        success: {type: boolean, const: false}
+        message: {type: string}
+        prompt: {type: [string, "null"]}
+        error: {type: string, const: RestoreIndeterminate}
+        context:
+          allOf:
+            - {$ref: "#/$defs/unknown_effect_context"}
+            - properties:
+                state: {type: string, const: indeterminate}
+      additionalProperties: false
