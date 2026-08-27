@@ -26,6 +26,7 @@ VOLUME_NAME_GUID = 0x00000001
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 MAX_RESTORE_FILE_SIZE_BYTES = 8_589_934_592
 HASH_CHUNK_SIZE_BYTES = 65_536
+ERROR_INVALID_HANDLE = 6
 
 
 if os.name == "nt":
@@ -42,6 +43,11 @@ if os.name == "nt":
     _kernel32.CreateFileW.restype = wintypes.HANDLE
     _kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
     _kernel32.CloseHandle.restype = wintypes.BOOL
+    _kernel32.GetHandleInformation.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    _kernel32.GetHandleInformation.restype = wintypes.BOOL
     _kernel32.GetFinalPathNameByHandleW.argtypes = (
         wintypes.HANDLE,
         wintypes.LPWSTR,
@@ -134,6 +140,11 @@ class WindowsPathComponentEvidence:
     reparse_tag: int
 
 
+@dataclass(frozen=True)
+class HandleCloseObservation:
+    state: str
+
+
 def _require_windows():
     if _kernel32 is None:
         raise OSError("Windows path guard harness requires Windows")
@@ -191,9 +202,30 @@ def _reject_unsafe_hardlinks(handle):
         raise ValueError("hardlink aliases are not restore authority")
 
 
-def _close_handle(handle):
-    if handle not in (None, INVALID_HANDLE_VALUE) and not _kernel32.CloseHandle(handle):
-        _win_error("CloseHandle failed")
+def _probe_handle_after_failed_close(handle, expected_identity):
+    flags = wintypes.DWORD()
+    ctypes.set_last_error(0)
+    if not _kernel32.GetHandleInformation(handle, ctypes.byref(flags)):
+        if ctypes.get_last_error() == ERROR_INVALID_HANDLE:
+            return HandleCloseObservation("closed")
+        return HandleCloseObservation("indeterminate")
+    if expected_identity is None:
+        return HandleCloseObservation("indeterminate")
+    try:
+        observed_identity = _identity(handle)
+    except OSError:
+        return HandleCloseObservation("indeterminate")
+    if observed_identity == expected_identity:
+        return HandleCloseObservation("still_owned")
+    return HandleCloseObservation("indeterminate")
+
+
+def _close_handle(handle, *, expected_identity=None):
+    if handle in (None, INVALID_HANDLE_VALUE):
+        return HandleCloseObservation("closed")
+    if _kernel32.CloseHandle(handle):
+        return HandleCloseObservation("closed")
+    return _probe_handle_after_failed_close(handle, expected_identity)
 
 
 def _identity(handle):
@@ -348,6 +380,8 @@ class RetainedWindowsPath:
         self.max_file_size_bytes = max_file_size_bytes
         self.hash_chunk_size_bytes = hash_chunk_size_bytes
         self._handles = []
+        self._handle_identities = []
+        self._indeterminate_handles = []
         self._directory_paths = []
         self._trusted_root_index = None
         self.confirmed = None
@@ -383,11 +417,15 @@ class RetainedWindowsPath:
             for directory in self._directory_paths:
                 directory_handle = _open_handle(directory, directory=True)
                 self._handles.append(directory_handle)
+                self._handle_identities.append(None)
                 _reject_reparse(directory_handle)
+                self._handle_identities[-1] = _identity(directory_handle)
             target_handle = _open_handle(self.target, directory=False)
             self._handles.append(target_handle)
+            self._handle_identities.append(None)
             _reject_reparse(target_handle)
             _reject_unsafe_hardlinks(target_handle)
+            self._handle_identities[-1] = _identity(target_handle)
             self.confirmed = self._capture_target(target_handle)
             self.component_evidence = self._capture_component_chain()
             self.dispatch_path = self.component_evidence[-1].final_path
@@ -409,14 +447,35 @@ class RetainedWindowsPath:
 
     @property
     def all_handles_retained(self):
-        return bool(self._handles) and all(
-            handle not in (None, INVALID_HANDLE_VALUE) for handle in self._handles
+        return (
+            not self._indeterminate_handles
+            and bool(self._handles)
+            and all(handle not in (None, INVALID_HANDLE_VALUE) for handle in self._handles)
         )
+
+    @property
+    def cleanup_state(self):
+        if self._indeterminate_handles:
+            return "indeterminate"
+        if self._handles:
+            return "still_owned"
+        return "closed"
 
     def close(self):
         while self._handles:
-            _close_handle(self._handles[-1])
-            self._handles.pop()
+            handle = self._handles[-1]
+            expected_identity = self._handle_identities[-1]
+            observation = _close_handle(handle, expected_identity=expected_identity)
+            if observation.state == "closed":
+                self._handles.pop()
+                self._handle_identities.pop()
+                continue
+            if observation.state == "indeterminate":
+                self._indeterminate_handles.append((handle, expected_identity))
+                self._handles.pop()
+                self._handle_identities.pop()
+                raise OSError("CloseHandle ownership indeterminate")
+            raise OSError("CloseHandle failed; exact handle is still owned")
 
     def _capture_component_chain(self):
         evidence = tuple(_component_evidence(handle) for handle in self._handles)
@@ -462,16 +521,29 @@ class WindowsSdkPathAdapter:
             raise TypeError("open_scene requires a RetainedWindowsPath")
         dispatch_path = retained_path.prepare_for_path_use()
         handle = _open_handle(dispatch_path, directory=False)
+        opened_scene = None
         try:
             opened_scene = retained_path._capture_target(handle)
         finally:
-            _close_handle(handle)
+            observation = _close_handle(
+                handle,
+                expected_identity=(opened_scene.identity if opened_scene is not None else None),
+            )
+            if observation.state != "closed":
+                raise OSError("SDK path adapter handle cleanup not confirmed")
         retained_path.verify_path_use(opened_scene)
         return opened_scene
 
     def open_path_for_control(self, path):
         handle = _open_handle(path, directory=False)
+        opened_scene = None
         try:
-            return _capture(handle)
+            opened_scene = _capture(handle)
+            return opened_scene
         finally:
-            _close_handle(handle)
+            observation = _close_handle(
+                handle,
+                expected_identity=(opened_scene.identity if opened_scene is not None else None),
+            )
+            if observation.state != "closed":
+                raise OSError("path control handle cleanup not confirmed")

@@ -129,9 +129,13 @@ before/after terminal receipt or explicit unknown effect
   after the retained handles are released; they must then succeed and make the same
   path resolve to a different file identity. This harness never invokes Shogun
   and therefore proves Windows path mechanics, not official SDK compatibility.
-- Treat a false `CloseHandle` return as cleanup failure. Do not remove that
-  exact handle from retained ownership, and do not let the cleanup diagnostic
-  replace an already-established primary operation outcome.
+- A false `CloseHandle` return is not itself proof that the numeric handle is
+  still owned. Independently probe handle validity and the captured file
+  identity. Classify the result as closed, still owned, or indeterminate. Remove
+  a verified-closed numeric handle and never retry it; retain only a verified
+  still-owned exact identity; quarantine an indeterminate value without retrying
+  it or claiming release. Cleanup diagnostics never replace an established
+  primary operation outcome.
 - A detected change after host connection returns `target_guard_rejected` with
   unknown effect, the bounded before receipt, null after receipt, and both
   confirmation consumption and SDK dispatch false. The executable invariant is
@@ -258,12 +262,17 @@ before/after terminal receipt or explicit unknown effect
   owner, claim generation, and fence revision. A stale, foreign or replaced
   claim or guard fails closed without committing and without releasing another
   owner's guard. While the exact claim fence and guard ownership are still
-  current, cleanup is attempted before the terminal commit. The adapter writes
-  a durable, typed, redacted cleanup disposition bound by digest to the job,
-  event, operation, and exact guard identity. Cleanup failure preserves the primary restore outcome.
-  It keeps the exact guard owner in the registry unless the boundary can
-  independently verify that closing completed. It never claims that a guard was released
-  merely because cleanup raised.
+  current, the adapter first atomically writes `cleanup_pending`, bound by
+  digest to the job, event, operation, and exact guard owner/generation. Only
+  then may it attempt release. The typed, redacted close observation is closed,
+  still owned, or indeterminate. The cleanup protocol preserves the primary restore outcome.
+  A verified still-owned guard remains with the exact registry owner;
+  an indeterminate numeric value moves to a non-retry quarantine and is never
+  described as released. It never claims that a guard was released without an
+  independent closed observation. A crash between release and disposition persistence is
+  restart-recoverable from the exact pending record. Reconciliation must write
+  the terminal record and permanent tombstone and notify waiters without a
+  second dispatch or read-back.
   A cancellation arriving while that claim owns read-back is written as a
   durable, HMAC-bound claim-bound cancellation intent in a separate audit
   record. It does not advance the claimed job revision. The terminal CAS folds
@@ -302,15 +311,21 @@ before/after terminal receipt or explicit unknown effect
   message/error only, and keeps the raw observation in private audit data.
   SDK read-back exceptions and an unserializable read-back follow that same
   branch; their raw exception text and payload never enter the public result.
+  The synchronous path creates its guard-bound durable job record in the same
+  registry before confirmation CAS or SDK dispatch and uses the same
+  `cleanup_pending` and restart-reconciliation protocol as late completion; it
+  may not claim registry ownership from a request-local object alone.
 - During late completion, an SDK exception, a resource-limit-plus-one receipt,
   or an unserializable read-back must terminalize as `failed_unknown` under the
-  exact durable claim fence. The adapter attempts cleanup for only that
-  claimant's retained guard, persists the typed cleanup disposition, then writes
-  the terminal record and permanent tombstone and must notify every waiter even
-  when cleanup fails. A retained owner remains explicit in both private and
-  public-safe lifecycle fields; raw close diagnostics never replace or enter the
-  primary result. Later or duplicate polling returns the terminal descriptor
-  without another read-back or dispatch.
+  exact durable claim fence. The adapter persists the exact guard-bound
+  `cleanup_pending` record before attempting cleanup for that claimant. It then
+  writes the typed cleanup disposition, terminal record, and permanent tombstone
+  and must notify every waiter even when release fails. A restart reconciles any
+  pending cleanup to those same terminal artifacts. A verified retained owner or
+  indeterminate quarantine remains explicit in both private and public-safe
+  lifecycle fields; raw close diagnostics never replace or enter the primary
+  result. Later or duplicate polling returns the terminal descriptor without
+  another read-back or dispatch.
 - `scene_identity_sha256` is not an opaque implementation choice. Treat
   `GetSceneName` as an exact two-string `(scene_path, name-or-path)` tuple. For a
   saved scene, `scene_path` is an absolute Windows directory. If the second

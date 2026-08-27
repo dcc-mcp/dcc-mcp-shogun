@@ -55,6 +55,8 @@ private_audit_contract:
   public_projection: adapter_secret_hmac_sha256_v1
 
 synchronous_completion:
+  registry: same_durable_job_registry_as_async_completion
+  guard_record: persisted_before_confirmation_cas_or_sdk_dispatch
   readback_value: exact_official_sdk_readback_return
   synthetic_fixture_success: forbidden
   classification: shared_guarded_completion_classifier
@@ -63,7 +65,9 @@ synchronous_completion:
   unserializable_readback: failed_unknown_without_public_payload
   failed_unknown_after_receipt: "null"
   public_payload_projection: fixed_message_and_error_only
-  cleanup_store: durable_typed_redacted_cleanup_record
+  cleanup_store: durable_exact_guard_bound_cleanup_record_v2
+  cleanup_pending: persisted_before_guard_release
+  restart_reconciliation: exact_pending_record_to_terminal_tombstone_and_waiter_notification
   cleanup_failure: preserve_primary_result_and_retain_owner_until_verified_closed
 
 preconditions:
@@ -153,16 +157,23 @@ async_job_contract:
     release_before_dispatch: cancellation_or_guard_rejection
     release_after_dispatch: only_after_terminal_readback_or_terminal_unknown_effect
   cleanup:
-    store: durable_typed_redacted_cleanup_record
+    store: durable_exact_guard_bound_cleanup_record_v2
     binding: sha256_exact_job_generation_operation_event_and_guard_identity
-    release_attempt: under_exact_claim_fence_before_terminal_commit
+    pending_state: cleanup_pending_not_publicly_publishable
+    pending_write: atomic_before_guard_release_under_exact_claim_fence
+    release_attempt: only_after_durable_cleanup_pending
+    release_observation: independently_verified_closed_still_owned_or_indeterminate
+    restart_reconciliation: exact_pending_binding_to_terminal_tombstone_and_waiter_notification
+    synchronous_path: same_durable_job_registry_and_cleanup_protocol
     dispositions:
       - not_started
       - released
       - release_failed_owner_retained
       - released_after_error_verified_closed
+      - release_indeterminate_quarantined
     failure_policy: preserve_primary_outcome_and_never_claim_false_release
     retained_failure_owner: trusted_adapter_local_restore_job_registry
+    indeterminate_owner: cleanup_ownership_indeterminate_registry_quarantine
     terminal_record: durable_with_cleanup_disposition
     tombstone: always_persisted_for_terminal_outcome
     waiter_notification: always_after_terminal_record_and_tombstone
@@ -199,7 +210,7 @@ async_job_contract:
       unserializable_receipt: terminal_failed_unknown_under_exact_claim_fence
       after_receipt: "null"
       public_diagnostic: fixed_message_and_error_only
-      guard_release: under_exact_claim_fence_before_terminal_commit
+      guard_release: after_durable_exact_guard_bound_cleanup_pending
       waiter_notification: after_terminal_record_and_tombstone_even_when_cleanup_fails
       duplicate_poll: return_terminal_without_readback_or_dispatch
     claim_fence:
@@ -216,7 +227,7 @@ async_job_contract:
         - retained_guard_owner_and_generation
       completion_cas: exact_latest_owner_generation_and_fence_revision
       guard_recapture: immediately_before_terminal_cas
-      guard_release: exact_claimed_guard_only_with_typed_cleanup_disposition
+      guard_release: exact_claimed_guard_only_after_durable_cleanup_pending
       stale_foreign_or_replaced: reject_without_commit_or_guard_release
       active_claim_cancellation: durable_hmac_bound_side_intent_without_job_revision_advance
     claim_schema:
@@ -247,15 +258,15 @@ async_job_contract:
         retained_guard_owner: {type: string, pattern: "^rgo1-[0-9a-f]{64}$"}
         retained_guard_generation: {type: string, pattern: "^[0-9a-f]{16}$"}
       additionalProperties: false
-    handles: released_or_truthfully_retained_by_cleanup_disposition
+    handles: released_retained_or_quarantined_by_typed_cleanup_disposition
   transitions:
     synchronization: durable_store_compare_and_set_lock
     record_revision: strictly_monotonic_every_record_write
     event_sequence: strictly_monotonic_exact_event_order
     terminal_immutability: no_writes_after_terminal
     readback_claim: durable_hmac_owner_generation_and_revision_fence
-    completion_commit: immediate_guard_recapture_then_exact_fence_terminal_cas
-    handle_release: exact_claim_fenced_cleanup_before_terminal_commit
+    completion_commit: immediate_guard_recapture_then_cleanup_pending_then_terminal_cas
+    handle_release: only_after_durable_exact_guard_bound_cleanup_pending
     cancellation_during_readback_claim: fold_exact_durable_side_intent_into_terminal_cas
     readback: exactly_once_per_job
     duplicate_completion: return_existing_terminal_without_readback
@@ -569,8 +580,11 @@ target_guard:
   swap_attempt_while_pinned: blocked_by_windows_share_contract
   close_semantics:
     close_api: CloseHandle
-    false_return: cleanup_failure
-    failed_handle: retained_by_exact_owner
+    false_return: independently_probe_handle_validity_and_exact_identity
+    observations: [closed, still_owned, indeterminate]
+    closed: remove_numeric_handle_and_never_retry
+    still_owned: retain_by_exact_owner
+    indeterminate: quarantine_without_retry_or_release_claim
     primary_outcome: preserved
   adversarial_proof:
     phases: [preflight, recapture, cas, dispatch]
@@ -794,6 +808,7 @@ private_audit_result_schema:
           enum:
             - released_before_dispatch
             - trusted_adapter_local_restore_job_registry
+            - cleanup_ownership_indeterminate_registry_quarantine
             - released_after_terminal_readback
             - released_after_terminal_unknown
         dispatch_count: {type: integer, minimum: 0, maximum: 1}
@@ -813,6 +828,7 @@ private_audit_result_schema:
             - released
             - release_failed_owner_retained
             - released_after_error_verified_closed
+            - release_indeterminate_quarantined
         record_revision: {type: integer, minimum: 1}
         event_sequence: {type: integer, minimum: 0}
         identity_tombstoned: {type: boolean, const: true}
@@ -917,14 +933,21 @@ private_audit_result_schema:
             cancellation_effective: {type: boolean}
             handle_retention_owner:
               type: string
-              enum: [released_before_dispatch, trusted_adapter_local_restore_job_registry]
+              enum:
+                - released_before_dispatch
+                - trusted_adapter_local_restore_job_registry
+                - cleanup_ownership_indeterminate_registry_quarantine
             dispatch_count: {type: integer, const: 0}
             dispatch_attempt_reserved: {type: boolean, const: false}
             poll_allowed: {type: boolean, const: false}
             late_completion_disposition: {type: string, const: not_applicable}
             cleanup_disposition:
               type: string
-              enum: [released, release_failed_owner_retained, released_after_error_verified_closed]
+              enum:
+                - released
+                - release_failed_owner_retained
+                - released_after_error_verified_closed
+                - release_indeterminate_quarantined
             terminal_event_id: {type: string}
             terminal_event_digest_sha256: {type: string}
         - oneOf:
@@ -941,6 +964,10 @@ private_audit_result_schema:
                 cleanup_disposition: {const: release_failed_owner_retained}
                 handle_retention_owner:
                   {const: trusted_adapter_local_restore_job_registry}
+            - properties:
+                cleanup_disposition: {const: release_indeterminate_quarantined}
+                handle_retention_owner:
+                  {const: cleanup_ownership_indeterminate_registry_quarantine}
             - properties:
                 cleanup_disposition:
                   {enum: [released, released_after_error_verified_closed]}
@@ -963,7 +990,10 @@ private_audit_result_schema:
             cancellation_effective: {type: boolean, const: false}
             handle_retention_owner:
               type: string
-              enum: [released_after_terminal_readback, trusted_adapter_local_restore_job_registry]
+              enum:
+                - released_after_terminal_readback
+                - trusted_adapter_local_restore_job_registry
+                - cleanup_ownership_indeterminate_registry_quarantine
             dispatch_count: {type: integer, const: 1}
             dispatch_attempt_reserved: {type: boolean, const: true}
             poll_allowed: {type: boolean, const: false}
@@ -972,7 +1002,11 @@ private_audit_result_schema:
               enum: [not_applicable, terminalized_by_official_sdk_readback]
             cleanup_disposition:
               type: string
-              enum: [released, release_failed_owner_retained, released_after_error_verified_closed]
+              enum:
+                - released
+                - release_failed_owner_retained
+                - released_after_error_verified_closed
+                - release_indeterminate_quarantined
             terminal_event_id: {type: string}
             terminal_event_digest_sha256: {type: string}
         - oneOf:
@@ -989,6 +1023,10 @@ private_audit_result_schema:
                 cleanup_disposition: {const: release_failed_owner_retained}
                 handle_retention_owner:
                   {const: trusted_adapter_local_restore_job_registry}
+            - properties:
+                cleanup_disposition: {const: release_indeterminate_quarantined}
+                handle_retention_owner:
+                  {const: cleanup_ownership_indeterminate_registry_quarantine}
             - properties:
                 cleanup_disposition:
                   {enum: [released, released_after_error_verified_closed]}
@@ -1009,14 +1047,21 @@ private_audit_result_schema:
             cancellation_effective: {type: boolean, const: false}
             handle_retention_owner:
               type: string
-              enum: [released_after_terminal_unknown, trusted_adapter_local_restore_job_registry]
+              enum:
+                - released_after_terminal_unknown
+                - trusted_adapter_local_restore_job_registry
+                - cleanup_ownership_indeterminate_registry_quarantine
             dispatch_count: {type: integer, const: 1}
             dispatch_attempt_reserved: {type: boolean, const: true}
             poll_allowed: {type: boolean, const: false}
             late_completion_disposition: {type: string, const: not_applicable}
             cleanup_disposition:
               type: string
-              enum: [released, release_failed_owner_retained, released_after_error_verified_closed]
+              enum:
+                - released
+                - release_failed_owner_retained
+                - released_after_error_verified_closed
+                - release_indeterminate_quarantined
             terminal_event_id: {type: string}
             terminal_event_digest_sha256: {type: string}
         - oneOf:
@@ -1033,6 +1078,10 @@ private_audit_result_schema:
                 cleanup_disposition: {const: release_failed_owner_retained}
                 handle_retention_owner:
                   {const: trusted_adapter_local_restore_job_registry}
+            - properties:
+                cleanup_disposition: {const: release_indeterminate_quarantined}
+                handle_retention_owner:
+                  {const: cleanup_ownership_indeterminate_registry_quarantine}
             - properties:
                 cleanup_disposition:
                   {enum: [released, released_after_error_verified_closed]}
@@ -1420,6 +1469,7 @@ output_schema:
           enum:
             - released_before_dispatch
             - trusted_adapter_local_restore_job_registry
+            - cleanup_ownership_indeterminate_registry_quarantine
             - released_after_terminal_readback
             - released_after_terminal_unknown
         dispatch_count: {type: integer, minimum: 0, maximum: 1}
@@ -1439,6 +1489,7 @@ output_schema:
             - released
             - release_failed_owner_retained
             - released_after_error_verified_closed
+            - release_indeterminate_quarantined
         record_revision: {type: integer, minimum: 1}
         event_sequence: {type: integer, minimum: 0}
         identity_tombstoned: {type: boolean, const: true}
@@ -1467,14 +1518,21 @@ output_schema:
             cancellation_effective: {type: boolean}
             handle_retention_owner:
               type: string
-              enum: [released_before_dispatch, trusted_adapter_local_restore_job_registry]
+              enum:
+                - released_before_dispatch
+                - trusted_adapter_local_restore_job_registry
+                - cleanup_ownership_indeterminate_registry_quarantine
             dispatch_count: {type: integer, const: 0}
             dispatch_attempt_reserved: {type: boolean, const: false}
             poll_allowed: {type: boolean, const: false}
             late_completion_disposition: {type: string, const: not_applicable}
             cleanup_disposition:
               type: string
-              enum: [released, release_failed_owner_retained, released_after_error_verified_closed]
+              enum:
+                - released
+                - release_failed_owner_retained
+                - released_after_error_verified_closed
+                - release_indeterminate_quarantined
             terminal_event_hmac_sha256: {type: string}
         - oneOf:
             - properties:
@@ -1490,6 +1548,10 @@ output_schema:
                 cleanup_disposition: {const: release_failed_owner_retained}
                 handle_retention_owner:
                   {const: trusted_adapter_local_restore_job_registry}
+            - properties:
+                cleanup_disposition: {const: release_indeterminate_quarantined}
+                handle_retention_owner:
+                  {const: cleanup_ownership_indeterminate_registry_quarantine}
             - properties:
                 cleanup_disposition:
                   {enum: [released, released_after_error_verified_closed]}
@@ -1578,7 +1640,10 @@ output_schema:
             cancellation_effective: {type: boolean, const: false}
             handle_retention_owner:
               type: string
-              enum: [released_after_terminal_readback, trusted_adapter_local_restore_job_registry]
+              enum:
+                - released_after_terminal_readback
+                - trusted_adapter_local_restore_job_registry
+                - cleanup_ownership_indeterminate_registry_quarantine
             dispatch_count: {type: integer, const: 1}
             dispatch_attempt_reserved: {type: boolean, const: true}
             poll_allowed: {type: boolean, const: false}
@@ -1587,7 +1652,11 @@ output_schema:
               enum: [not_applicable, terminalized_by_official_sdk_readback]
             cleanup_disposition:
               type: string
-              enum: [released, release_failed_owner_retained, released_after_error_verified_closed]
+              enum:
+                - released
+                - release_failed_owner_retained
+                - released_after_error_verified_closed
+                - release_indeterminate_quarantined
             terminal_event_hmac_sha256: {type: string}
         - oneOf:
             - properties:
@@ -1603,6 +1672,10 @@ output_schema:
                 cleanup_disposition: {const: release_failed_owner_retained}
                 handle_retention_owner:
                   {const: trusted_adapter_local_restore_job_registry}
+            - properties:
+                cleanup_disposition: {const: release_indeterminate_quarantined}
+                handle_retention_owner:
+                  {const: cleanup_ownership_indeterminate_registry_quarantine}
             - properties:
                 cleanup_disposition:
                   {enum: [released, released_after_error_verified_closed]}
@@ -1619,14 +1692,21 @@ output_schema:
             cancellation_effective: {type: boolean, const: false}
             handle_retention_owner:
               type: string
-              enum: [released_after_terminal_unknown, trusted_adapter_local_restore_job_registry]
+              enum:
+                - released_after_terminal_unknown
+                - trusted_adapter_local_restore_job_registry
+                - cleanup_ownership_indeterminate_registry_quarantine
             dispatch_count: {type: integer, const: 1}
             dispatch_attempt_reserved: {type: boolean, const: true}
             poll_allowed: {type: boolean, const: false}
             late_completion_disposition: {type: string, const: not_applicable}
             cleanup_disposition:
               type: string
-              enum: [released, release_failed_owner_retained, released_after_error_verified_closed]
+              enum:
+                - released
+                - release_failed_owner_retained
+                - released_after_error_verified_closed
+                - release_indeterminate_quarantined
             terminal_event_hmac_sha256: {type: string}
         - oneOf:
             - properties:
@@ -1642,6 +1722,10 @@ output_schema:
                 cleanup_disposition: {const: release_failed_owner_retained}
                 handle_retention_owner:
                   {const: trusted_adapter_local_restore_job_registry}
+            - properties:
+                cleanup_disposition: {const: release_indeterminate_quarantined}
+                handle_retention_owner:
+                  {const: cleanup_ownership_indeterminate_registry_quarantine}
             - properties:
                 cleanup_disposition:
                   {enum: [released, released_after_error_verified_closed]}

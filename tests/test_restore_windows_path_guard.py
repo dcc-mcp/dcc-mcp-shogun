@@ -252,6 +252,81 @@ def test_close_handle_failure_is_observable_and_retains_exact_cleanup_owner(
     assert retained.all_handles_retained is False
 
 
+def test_close_handle_false_after_real_close_is_verified_and_never_retried(
+    tmp_path,
+    monkeypatch,
+):
+    _, trusted_root, _, target, _, _ = _scene_layout(tmp_path)
+    retained = RetainedWindowsPath(trusted_root, target)
+    retained.__enter__()
+    original_close_handle = path_guard._kernel32.CloseHandle
+    target_handle = retained._handles[-1]
+    close_calls = []
+
+    def close_then_report_false(handle):
+        close_calls.append(handle)
+        assert original_close_handle(handle)
+        return 0
+
+    monkeypatch.setattr(path_guard._kernel32, "CloseHandle", close_then_report_false)
+    try:
+        retained.close()
+    finally:
+        monkeypatch.setattr(path_guard._kernel32, "CloseHandle", original_close_handle)
+        retained.close()
+
+    assert close_calls.count(target_handle) == 1
+    assert len(close_calls) == len(set(close_calls))
+    assert target_handle not in retained._handles
+    assert retained.all_handles_retained is False
+
+
+def test_close_handle_indeterminate_is_neither_released_nor_retried(
+    tmp_path,
+    monkeypatch,
+):
+    _, trusted_root, _, target, _, _ = _scene_layout(tmp_path)
+    retained = RetainedWindowsPath(trusted_root, target)
+    retained.__enter__()
+    original_close_handle = path_guard._kernel32.CloseHandle
+    original_get_handle_information = path_guard._kernel32.GetHandleInformation
+    target_handle = retained._handles[-1]
+    close_calls = []
+
+    def close_then_report_false(handle):
+        close_calls.append(handle)
+        assert original_close_handle(handle)
+        return 0
+
+    def unverifiable_handle(_handle, _flags):
+        path_guard.ctypes.set_last_error(5)
+        return 0
+
+    monkeypatch.setattr(path_guard._kernel32, "CloseHandle", close_then_report_false)
+    monkeypatch.setattr(
+        path_guard._kernel32,
+        "GetHandleInformation",
+        unverifiable_handle,
+    )
+    try:
+        with pytest.raises(OSError, match="ownership indeterminate"):
+            retained.close()
+        assert retained.cleanup_state == "indeterminate"
+        assert retained.all_handles_retained is False
+        assert close_calls == [target_handle]
+        assert target_handle not in retained._handles
+    finally:
+        monkeypatch.setattr(path_guard._kernel32, "CloseHandle", original_close_handle)
+        monkeypatch.setattr(
+            path_guard._kernel32,
+            "GetHandleInformation",
+            original_get_handle_information,
+        )
+        retained.close()
+
+    assert close_calls == [target_handle]
+
+
 def test_context_cleanup_failure_does_not_replace_the_primary_operation_error(
     tmp_path,
     monkeypatch,

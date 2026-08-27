@@ -722,6 +722,39 @@ def test_cancellation_before_dispatch_cleanup_failure_retains_owner_and_tombston
     assert guard.release_error_text not in json.dumps(result, sort_keys=True)
 
 
+def test_cancellation_cleanup_crash_reconciles_terminal_state_after_restart():
+    request = _request()
+    confirmation_store = FakeTrustedConfirmationStore()
+    confirmation_store.issue(request, authenticated=True)
+    durable_store = FakeDurableJobStore()
+    durable_store.cleanup_store.crash_after_release_once = True
+    sdk = FakeOfficialSdkBoundary()
+    guard = FakeGuardedTargetBoundary()
+    jobs = FakeAsyncRestoreJobRegistry(durable_store)
+    workflow = FakeAsyncRestoreWorkflow(confirmation_store, sdk, guard, jobs)
+
+    with pytest.raises(RuntimeError, match="simulated crash after guard release"):
+        workflow.start(request, "cancellation_before_dispatch")
+
+    job_id = next(iter(durable_store.records))
+    assert durable_store.records[job_id]["status"] == "cleanup_pending"
+    assert guard.release_count == 1
+    assert durable_store.waiter_notification_count == 0
+
+    restarted = FakeAsyncRestoreJobRegistry(durable_store)
+    terminal = restarted.descriptor(job_id)
+
+    assert terminal["status"] == "terminal_not_dispatched"
+    assert terminal["terminal_source"] == "cancellation_before_dispatch"
+    assert terminal["cancellation_disposition"] == "honored_before_dispatch"
+    assert terminal["cleanup_disposition"] == "released_after_error_verified_closed"
+    assert restarted.tombstone(job_id)["cleanup_disposition"] == (
+        "released_after_error_verified_closed"
+    )
+    assert durable_store.waiter_notification_count == 1
+    assert confirmation_store.consume_count == sdk.dispatch_count == sdk.readback_count == 0
+
+
 @pytest.mark.parametrize(
     ("outcome", "state", "cancellation_disposition"),
     (
@@ -953,6 +986,90 @@ def test_late_post_close_failure_terminalizes_with_verified_release_and_tombston
     serialized = json.dumps({"result": result, "cleanup": jobs.cleanup_record(job_id)})
     assert guard.release_error_text not in serialized
     assert r"C:\secret" not in serialized
+
+
+def test_late_indeterminate_close_is_quarantined_without_false_release_claim():
+    request = _request()
+    confirmation_store = FakeTrustedConfirmationStore()
+    confirmation_store.issue(request, authenticated=True)
+    sdk = FakeOfficialSdkBoundary()
+    guard = FakeGuardedTargetBoundary(release_failure_phase="indeterminate_after_close")
+    jobs = FakeAsyncRestoreJobRegistry()
+    workflow = FakeAsyncRestoreWorkflow(confirmation_store, sdk, guard, jobs)
+    job_id = workflow.start(request, "request_timeout")["context"]["job"]["job_id"]
+
+    result = workflow.poll(job_id, late_success=True)
+
+    _validate_result(result)
+    terminal = result["context"]["job"]
+    assert terminal["status"] == "terminal"
+    assert terminal["cleanup_disposition"] == "release_indeterminate_quarantined"
+    assert terminal["handle_retention_owner"] == (
+        "cleanup_ownership_indeterminate_registry_quarantine"
+    )
+    assert jobs.tombstone(job_id)["cleanup_disposition"] == ("release_indeterminate_quarantined")
+    assert jobs.cleanup_record(job_id)["disposition"] == ("release_indeterminate_quarantined")
+    assert guard.release_count == 1
+    assert guard.conflicting_replace_allowed() is True
+    assert guard.release_error_text not in json.dumps(result, sort_keys=True)
+
+
+def test_cleanup_resolution_crash_after_release_reconciles_on_registry_restart():
+    durable_store = FakeDurableJobStore()
+    durable_store.cleanup_store.crash_after_release_once = True
+    workflow, jobs, sdk, job_id = _pending_async_workflow(durable_store)
+    guard = jobs._records[job_id]["guard"]
+
+    with pytest.raises(RuntimeError, match="simulated crash after guard release"):
+        workflow.poll(job_id, late_success=True)
+
+    stranded = durable_store.records[job_id]
+    assert stranded["status"] == "cleanup_pending"
+    assert stranded["cleanup_pending"] == {
+        "cleanup_version": "2.0",
+        "cleanup_binding_sha256": stranded["cleanup_pending"]["cleanup_binding_sha256"],
+        "phase": "late_readback_terminal",
+        "guard_owner": stranded["retained_guard_owner"],
+        "guard_generation": stranded["retained_guard_generation"],
+        "release_observation": "not_recorded",
+    }
+    assert guard.release_count == 1
+    assert durable_store.waiter_notification_count == 0
+    assert sdk.dispatch_count == sdk.readback_count == 1
+
+    restarted = FakeAsyncRestoreJobRegistry(durable_store)
+    terminal = restarted.descriptor(job_id)
+
+    assert terminal["status"] == "terminal"
+    assert terminal["terminal_source"] == "official_sdk_readback"
+    assert terminal["cleanup_disposition"] == "released_after_error_verified_closed"
+    assert terminal["handle_retention_owner"] == "released_after_terminal_readback"
+    assert restarted.tombstone(job_id)["cleanup_disposition"] == (
+        "released_after_error_verified_closed"
+    )
+    assert restarted.cleanup_record(job_id)["disposition"] == (
+        "released_after_error_verified_closed"
+    )
+    assert durable_store.waiter_notification_count == 1
+    assert sdk.dispatch_count == sdk.readback_count == 1
+
+
+def test_status_read_reconciles_cleanup_pending_before_publication():
+    durable_store = FakeDurableJobStore()
+    durable_store.cleanup_store.crash_after_release_once = True
+    workflow, jobs, sdk, job_id = _pending_async_workflow(durable_store)
+
+    with pytest.raises(RuntimeError, match="simulated crash after guard release"):
+        workflow.poll(job_id, late_success=True)
+
+    assert durable_store.records[job_id]["status"] == "cleanup_pending"
+    terminal = jobs.descriptor(job_id)
+
+    assert terminal["status"] == "terminal"
+    assert terminal["cleanup_disposition"] == "released_after_error_verified_closed"
+    assert jobs.tombstone(job_id)["cleanup_disposition"] == ("released_after_error_verified_closed")
+    assert durable_store.waiter_notification_count == 1
+    assert sdk.dispatch_count == sdk.readback_count == 1
 
 
 def test_late_readback_with_a_wrong_canonical_digest_terminalizes_unknown_not_success():
@@ -1432,7 +1549,7 @@ def test_claim_bound_cancellation_intent_survives_registry_restart():
     assert cancellation["effective"] is False
     assert outcome == "succeeded"
     terminal = restarted.descriptor(job_id)
-    assert terminal["record_revision"] == claimed_revision + 1
+    assert terminal["record_revision"] == claimed_revision + 2
     assert terminal["cancellation_requested"] is True
     assert terminal["cancellation_effective"] is False
     assert terminal["cancellation_disposition"] == ("requested_after_dispatch_operation_continues")
@@ -2005,6 +2122,42 @@ class FakeDurableCleanupStore:
     def __init__(self):
         self.condition = Condition(RLock())
         self.records = []
+        self.pending_records = {}
+        self.crash_after_release_once = False
+
+    @staticmethod
+    def _binding_digest(binding):
+        canonical = json.dumps(binding, separators=(",", ":"), sort_keys=True).encode()
+        return hashlib.sha256(canonical).hexdigest()
+
+    def prepare(self, *, binding, phase):
+        cleanup_binding_sha256 = self._binding_digest(binding)
+        pending = {
+            "cleanup_version": "2.0",
+            "cleanup_binding_sha256": cleanup_binding_sha256,
+            "phase": phase,
+            "guard_owner": binding["guard_owner"],
+            "guard_generation": binding["guard_generation"],
+            "release_observation": "not_recorded",
+        }
+        with self.condition:
+            self.pending_records[cleanup_binding_sha256] = dict(pending)
+        return pending
+
+    def resolve(self, pending, disposition):
+        if self.crash_after_release_once:
+            self.crash_after_release_once = False
+            raise RuntimeError("simulated crash after guard release")
+        cleanup_record = {
+            "cleanup_version": pending["cleanup_version"],
+            "cleanup_binding_sha256": pending["cleanup_binding_sha256"],
+            "phase": pending["phase"],
+            "disposition": disposition,
+        }
+        with self.condition:
+            self.records.append(cleanup_record)
+            self.pending_records.pop(pending["cleanup_binding_sha256"], None)
+        return dict(cleanup_record)
 
     def record(self, *, binding, phase, disposition):
         canonical = json.dumps(binding, separators=(",", ":"), sort_keys=True).encode()
@@ -2030,26 +2183,30 @@ def _release_guard_preserving_primary(
     phase,
     guard,
     guard_token,
+    prepared=None,
 ):
     try:
         guard.release(guard_token)
     except Exception:
-        disposition = (
-            "release_failed_owner_retained"
-            if guard.owns(guard_token)
-            else "released_after_error_verified_closed"
-        )
+        disposition = {
+            "still_owned": "release_failed_owner_retained",
+            "closed": "released_after_error_verified_closed",
+            "indeterminate": "release_indeterminate_quarantined",
+        }[guard.cleanup_state(guard_token)]
     else:
         disposition = "released"
-    return cleanup_store.record(
-        binding={
-            **binding,
-            "guard_owner": guard_token["guard_owner"],
-            "guard_generation": guard_token["guard_generation"],
-        },
-        phase=phase,
-        disposition=disposition,
-    )
+    exact_binding = {
+        **binding,
+        "guard_owner": guard_token["guard_owner"],
+        "guard_generation": guard_token["guard_generation"],
+    }
+    if prepared is None:
+        return cleanup_store.record(
+            binding=exact_binding,
+            phase=phase,
+            disposition=disposition,
+        )
+    return cleanup_store.resolve(prepared, disposition)
 
 
 class FakeGuardedTargetBoundary:
@@ -2076,6 +2233,7 @@ class FakeGuardedTargetBoundary:
         self.release_count = 0
         self._active_count = 0
         self._active_generations = set()
+        self._cleanup_indeterminate_generations = set()
         self.attempt_phase = attempt_phase
         self.observed_change_phase = observed_change_phase
         self.attack_kind = attack_kind
@@ -2126,6 +2284,14 @@ class FakeGuardedTargetBoundary:
             and token.get("guard_owner") == "rgo1-" + self._owner_secret
             and token.get("guard_generation") in self._active_generations
         )
+
+    def cleanup_state(self, token):
+        generation = token.get("guard_generation")
+        if generation in self._active_generations:
+            return "still_owned"
+        if generation in self._cleanup_indeterminate_generations:
+            return "indeterminate"
+        return "closed"
 
     def checkpoint_identity(self, token, phase):
         assert token["held"] is True
@@ -2186,23 +2352,40 @@ class FakeGuardedTargetBoundary:
             self._active_count -= 1
         if self.release_failure_phase == "after_close":
             raise RuntimeError(self.release_error_text)
+        if self.release_failure_phase == "indeterminate_after_close":
+            self._cleanup_indeterminate_generations.add(token["guard_generation"])
+            raise RuntimeError(self.release_error_text)
 
 
 class FakeRestoreWorkflow:
-    def __init__(self, store, sdk, guard, before_cas_barrier, cleanup_store=None):
+    def __init__(
+        self,
+        store,
+        sdk,
+        guard,
+        before_cas_barrier,
+        cleanup_store=None,
+        durable_store=None,
+    ):
         self.store = store
         self.sdk = sdk
         self.guard = guard
         self.before_cas_barrier = before_cas_barrier
-        self.cleanup_store = cleanup_store or FakeDurableCleanupStore()
+        self.jobs = FakeAsyncRestoreJobRegistry(durable_store or FakeDurableJobStore())
+        if cleanup_store is not None:
+            self.jobs.store.cleanup_store = cleanup_store
+        self.cleanup_store = self.jobs.store.cleanup_store
         self.conflicting_replace_observations = []
 
     def execute(self, request):
         ticket = self.store.trusted_lookup_and_compare(request)
         assert ticket is not None
+        job_id = self.jobs.create_before_host_connection(request, ticket, self.store.resolver)
         guard_token = self.guard.open()
+        self.jobs.retain_handles(job_id, self.guard, guard_token)
         try:
             before_receipt = self.sdk.capture_before()
+            self.jobs.record_before_receipt(job_id, before_receipt)
             if not self.guard.checkpoint_identity(guard_token, "preflight"):
                 result = _result("target_guard_rejected")
                 result["context"]["before_receipt"] = before_receipt
@@ -2234,7 +2417,9 @@ class FakeRestoreWorkflow:
                 result = _result("confirmation_consume_rejected")
                 result["context"]["before_receipt"] = before_receipt
                 return result
+            self.jobs.reserve_dispatch(job_id)
             self.sdk.dispatch_restore(self.guard.dispatch_capability(guard_token))
+            self.jobs.mark_dispatched(job_id)
             try:
                 actual_receipt = self.sdk.readback_after()
                 outcome = _classify_guarded_completion(
@@ -2258,23 +2443,9 @@ class FakeRestoreWorkflow:
             result["context"]["before_receipt"] = before_receipt
             return result
         finally:
-            cleanup_record = _release_guard_preserving_primary(
-                self.cleanup_store,
-                binding={
-                    "operation": "restore_scene",
-                    "request_id": request["request_id"],
-                },
-                phase="synchronous_result",
-                guard=self.guard,
-                guard_token=guard_token,
-            )
-            cleanup_disposition = cleanup_record["disposition"]
             if "result" in locals():
-                result["context"]["job"]["cleanup_disposition"] = cleanup_disposition
-                if cleanup_disposition == "release_failed_owner_retained":
-                    result["context"]["job"]["handle_retention_owner"] = (
-                        "trusted_adapter_local_restore_job_registry"
-                    )
+                self.jobs.complete_synchronous(job_id, result["context"]["state"])
+                result["context"]["job"] = self.jobs.descriptor(job_id)
 
 
 class FakeDurableJobStore:
@@ -2333,6 +2504,8 @@ class FakeAsyncRestoreJobRegistry:
         "readback_claim_generation",
         "readback_claim_record_revision",
         "readback_claim_fence_revision",
+        "cleanup_pending",
+        "cleanup_terminal_plan",
     }
 
     def __init__(self, durable_store=None):
@@ -2341,6 +2514,7 @@ class FakeAsyncRestoreJobRegistry:
         self._records = self.store.records
         self._next_id = 1
         self.poll_count = 0
+        self._reconcile_pending_cleanups()
 
     def create_before_host_connection(self, request, ticket, resolver):
         root = resolver.resolve(request["trusted_root"])
@@ -2407,6 +2581,8 @@ class FakeAsyncRestoreJobRegistry:
                 "readback_claim_record_revision": None,
                 "readback_claim_fence_revision": None,
                 "completion_event": None,
+                "cleanup_pending": None,
+                "cleanup_terminal_plan": None,
             }
         return job_id
 
@@ -2486,6 +2662,81 @@ class FakeAsyncRestoreJobRegistry:
             "handle_retention_owner": record["handle_retention_owner"],
         }
 
+    def _finalize_cleanup(self, record, cleanup_record):
+        plan = record["cleanup_terminal_plan"]
+        cleanup_disposition = cleanup_record["disposition"]
+        release_confirmed = cleanup_disposition in {
+            "released",
+            "released_after_error_verified_closed",
+        }
+        cleanup_indeterminate = cleanup_disposition == "release_indeterminate_quarantined"
+        self._advance(
+            record,
+            advance_event=False,
+            status=plan["status"],
+            snapshot_source=plan["snapshot_source"],
+            terminal_source=plan["terminal_source"],
+            handle_retention_owner=(
+                (
+                    "cleanup_ownership_indeterminate_registry_quarantine"
+                    if cleanup_indeterminate
+                    else "trusted_adapter_local_restore_job_registry"
+                )
+                if not release_confirmed
+                else plan["released_handle_owner"]
+            ),
+            poll_allowed=False,
+            late_completion_disposition=plan["late_completion_disposition"],
+            terminal_event_id=plan["terminal_event_id"],
+            terminal_event_digest_sha256=plan["terminal_event_digest_sha256"],
+            dispatch_count=plan["dispatch_count"],
+            terminal_outcome=plan["outcome"],
+            cancellation_requested=plan["cancellation_requested"],
+            cancellation_effective=plan["cancellation_effective"],
+            cancellation_disposition=plan["cancellation_disposition"],
+            cleanup_disposition=cleanup_disposition,
+            guard=(
+                record["guard"] if cleanup_disposition == "release_failed_owner_retained" else None
+            ),
+            guard_token=(
+                record["guard_token"]
+                if cleanup_disposition == "release_failed_owner_retained"
+                else None
+            ),
+            cleanup_pending=None,
+            cleanup_terminal_plan=None,
+        )
+        self._write_tombstone(record, cleanup_record)
+        self.store.waiter_notification_count += 1
+        self.store.condition.notify_all()
+
+    def _reconcile_cleanup_record(self, record):
+        pending = record.get("cleanup_pending")
+        plan = record.get("cleanup_terminal_plan")
+        guard = record.get("guard")
+        guard_token = record.get("guard_token")
+        if pending is None or plan is None or guard is None or guard_token is None:
+            raise RuntimeError("durable cleanup binding rejected")
+        exact_owner = (
+            pending["guard_owner"] == record["retained_guard_owner"]
+            and pending["guard_generation"] == record["retained_guard_generation"]
+        )
+        if not exact_owner:
+            raise RuntimeError("durable cleanup binding rejected")
+        disposition = {
+            "still_owned": "release_failed_owner_retained",
+            "closed": "released_after_error_verified_closed",
+            "indeterminate": "release_indeterminate_quarantined",
+        }[guard.cleanup_state(guard_token)]
+        cleanup_record = self.store.cleanup_store.resolve(pending, disposition)
+        self._finalize_cleanup(record, cleanup_record)
+
+    def _reconcile_pending_cleanups(self):
+        with self.store.condition:
+            for record in self._records.values():
+                if record.get("status") == "cleanup_pending":
+                    self._reconcile_cleanup_record(record)
+
     def retain_handles(self, job_id, guard, guard_token):
         with self.store.condition:
             record = self._records[job_id]
@@ -2556,6 +2807,71 @@ class FakeAsyncRestoreJobRegistry:
                 raise RuntimeError("unknown snapshot transition rejected")
             self._advance(record, snapshot_source=source)
 
+    def complete_synchronous(self, job_id, outcome):
+        with self.store.condition:
+            record = self._records[job_id]
+            if record["status"] in {"terminal", "terminal_not_dispatched"}:
+                return
+            source = {
+                "succeeded": "official_sdk_readback",
+                "failed_unchanged": "official_sdk_readback",
+                "failed_unknown": "official_sdk_failure",
+                "confirmation_consume_rejected": "confirmation_cas",
+                "target_guard_rejected": "target_guard",
+            }[outcome]
+            dispatched = record["dispatch_count"] == 1
+            terminal_event_id, terminal_event_digest = self._terminal_event(record, source)
+            guard = record["guard"]
+            guard_token = record["guard_token"]
+            cleanup_binding = {
+                "job_id": record["job_id"],
+                "job_generation": record["job_generation"],
+                "operation_binding_sha256": record["operation_binding_sha256"],
+                "terminal_event_id": terminal_event_id,
+                "guard_owner": guard_token["guard_owner"],
+                "guard_generation": guard_token["guard_generation"],
+            }
+            cleanup_pending = self.store.cleanup_store.prepare(
+                binding=cleanup_binding,
+                phase="synchronous_result",
+            )
+            self._advance(
+                record,
+                status="cleanup_pending",
+                cleanup_pending=cleanup_pending,
+                cleanup_terminal_plan={
+                    "outcome": outcome,
+                    "status": "terminal" if dispatched else "terminal_not_dispatched",
+                    "snapshot_source": source,
+                    "terminal_source": source,
+                    "released_handle_owner": (
+                        (
+                            "released_after_terminal_unknown"
+                            if outcome == "failed_unknown"
+                            else "released_after_terminal_readback"
+                        )
+                        if dispatched
+                        else "released_before_dispatch"
+                    ),
+                    "late_completion_disposition": "not_applicable",
+                    "dispatch_count": record["dispatch_count"],
+                    "terminal_event_id": terminal_event_id,
+                    "terminal_event_digest_sha256": terminal_event_digest,
+                    "cancellation_requested": False,
+                    "cancellation_effective": False,
+                    "cancellation_disposition": "not_requested",
+                },
+            )
+            cleanup_record = _release_guard_preserving_primary(
+                self.store.cleanup_store,
+                binding=cleanup_binding,
+                phase="synchronous_result",
+                guard=guard,
+                guard_token=guard_token,
+                prepared=cleanup_pending,
+            )
+            self._finalize_cleanup(record, cleanup_record)
+
     def request_cancellation(self, job_id):
         with self.store.condition:
             record = self._records[job_id]
@@ -2593,49 +2909,52 @@ class FakeAsyncRestoreJobRegistry:
             if record["dispatch_count"] == 0:
                 guard = record["guard"]
                 guard_token = record["guard_token"]
+                if guard is None or guard_token is None:
+                    raise RuntimeError("cancellation guard ownership rejected")
                 event_id, event_digest = self._terminal_event(
                     record,
                     "cancellation_before_dispatch",
                 )
-                cleanup_record = None
-                cleanup_disposition = "released"
-                if guard is not None and guard_token is not None:
-                    cleanup_record = _release_guard_preserving_primary(
-                        self.store.cleanup_store,
-                        binding={
-                            "job_id": record["job_id"],
-                            "job_generation": record["job_generation"],
-                            "operation_binding_sha256": record["operation_binding_sha256"],
-                            "terminal_event_id": event_id,
-                        },
-                        phase="cancellation_before_dispatch",
-                        guard=guard,
-                        guard_token=guard_token,
-                    )
-                    cleanup_disposition = cleanup_record["disposition"]
-                release_confirmed = cleanup_disposition != "release_failed_owner_retained"
+                cleanup_binding = {
+                    "job_id": record["job_id"],
+                    "job_generation": record["job_generation"],
+                    "operation_binding_sha256": record["operation_binding_sha256"],
+                    "terminal_event_id": event_id,
+                    "guard_owner": guard_token["guard_owner"],
+                    "guard_generation": guard_token["guard_generation"],
+                }
+                cleanup_pending = self.store.cleanup_store.prepare(
+                    binding=cleanup_binding,
+                    phase="cancellation_before_dispatch",
+                )
                 self._advance(
                     record,
-                    status="terminal_not_dispatched",
-                    snapshot_source="cancellation_before_dispatch",
-                    terminal_source="cancellation_before_dispatch",
-                    cancellation_disposition="honored_before_dispatch",
-                    cancellation_requested=True,
-                    cancellation_effective=True,
-                    handle_retention_owner=(
-                        "released_before_dispatch"
-                        if release_confirmed
-                        else "trusted_adapter_local_restore_job_registry"
-                    ),
-                    cleanup_disposition=cleanup_disposition,
-                    terminal_event_id=event_id,
-                    terminal_event_digest_sha256=event_digest,
-                    guard=None if release_confirmed else guard,
-                    guard_token=None if release_confirmed else guard_token,
+                    status="cleanup_pending",
+                    cleanup_pending=cleanup_pending,
+                    cleanup_terminal_plan={
+                        "outcome": "preflight_rejected",
+                        "status": "terminal_not_dispatched",
+                        "snapshot_source": "cancellation_before_dispatch",
+                        "terminal_source": "cancellation_before_dispatch",
+                        "released_handle_owner": "released_before_dispatch",
+                        "late_completion_disposition": "not_applicable",
+                        "dispatch_count": 0,
+                        "terminal_event_id": event_id,
+                        "terminal_event_digest_sha256": event_digest,
+                        "cancellation_requested": True,
+                        "cancellation_effective": True,
+                        "cancellation_disposition": "honored_before_dispatch",
+                    },
                 )
-                self._write_tombstone(record, cleanup_record)
-                self.store.waiter_notification_count += 1
-                self.store.condition.notify_all()
+                cleanup_record = _release_guard_preserving_primary(
+                    self.store.cleanup_store,
+                    binding=cleanup_binding,
+                    phase="cancellation_before_dispatch",
+                    guard=guard,
+                    guard_token=guard_token,
+                    prepared=cleanup_pending,
+                )
+                self._finalize_cleanup(record, cleanup_record)
                 return {
                     "requested": True,
                     "effective": True,
@@ -2848,7 +3167,58 @@ class FakeAsyncRestoreJobRegistry:
                 outcome = "failed_unknown"
             if actual_receipt_digest != event["completion_receipt_sha256"]:
                 outcome = "failed_unknown"
-            succeeded_or_unchanged = outcome in {"succeeded", "failed_unchanged"}
+            cleanup_binding = {
+                "job_id": record["job_id"],
+                "job_generation": record["job_generation"],
+                "operation_binding_sha256": record["operation_binding_sha256"],
+                "terminal_event_id": event["event_id"],
+                "guard_owner": guard_token["guard_owner"],
+                "guard_generation": guard_token["guard_generation"],
+            }
+            cleanup_pending = self.store.cleanup_store.prepare(
+                binding=cleanup_binding,
+                phase="late_readback_terminal",
+            )
+            self._advance(
+                record,
+                advance_event=False,
+                status="cleanup_pending",
+                cleanup_pending=cleanup_pending,
+                cleanup_terminal_plan={
+                    "outcome": outcome,
+                    "status": "terminal",
+                    "snapshot_source": (
+                        "late_official_sdk_readback"
+                        if outcome in {"succeeded", "failed_unchanged"}
+                        else "official_sdk_failure"
+                    ),
+                    "terminal_source": (
+                        "official_sdk_readback"
+                        if outcome in {"succeeded", "failed_unchanged"}
+                        else "official_sdk_failure"
+                    ),
+                    "released_handle_owner": (
+                        "released_after_terminal_readback"
+                        if outcome in {"succeeded", "failed_unchanged"}
+                        else "released_after_terminal_unknown"
+                    ),
+                    "late_completion_disposition": (
+                        "terminalized_by_official_sdk_readback"
+                        if outcome in {"succeeded", "failed_unchanged"}
+                        else "not_applicable"
+                    ),
+                    "dispatch_count": 1,
+                    "terminal_event_id": event["event_id"],
+                    "terminal_event_digest_sha256": event["event_digest_sha256"],
+                    "cancellation_requested": cancellation_intent is not None,
+                    "cancellation_effective": False,
+                    "cancellation_disposition": (
+                        "requested_after_dispatch_operation_continues"
+                        if cancellation_intent is not None
+                        else record["cancellation_disposition"]
+                    ),
+                },
+            )
             cleanup_record = _release_guard_preserving_primary(
                 self.store.cleanup_store,
                 binding={
@@ -2860,54 +3230,9 @@ class FakeAsyncRestoreJobRegistry:
                 phase="late_readback_terminal",
                 guard=guard,
                 guard_token=guard_token,
+                prepared=cleanup_pending,
             )
-            cleanup_disposition = cleanup_record["disposition"]
-            release_confirmed = cleanup_disposition != "release_failed_owner_retained"
-            self._advance(
-                record,
-                advance_event=False,
-                status="terminal",
-                snapshot_source=(
-                    "late_official_sdk_readback"
-                    if succeeded_or_unchanged
-                    else "official_sdk_failure"
-                ),
-                terminal_source=(
-                    "official_sdk_readback" if succeeded_or_unchanged else "official_sdk_failure"
-                ),
-                handle_retention_owner=(
-                    (
-                        "released_after_terminal_readback"
-                        if succeeded_or_unchanged
-                        else "released_after_terminal_unknown"
-                    )
-                    if release_confirmed
-                    else "trusted_adapter_local_restore_job_registry"
-                ),
-                poll_allowed=False,
-                late_completion_disposition=(
-                    "terminalized_by_official_sdk_readback"
-                    if succeeded_or_unchanged
-                    else "not_applicable"
-                ),
-                terminal_event_id=event["event_id"],
-                terminal_event_digest_sha256=event["event_digest_sha256"],
-                dispatch_count=1,
-                terminal_outcome=outcome,
-                cancellation_requested=cancellation_intent is not None,
-                cancellation_effective=False,
-                cancellation_disposition=(
-                    "requested_after_dispatch_operation_continues"
-                    if cancellation_intent is not None
-                    else record["cancellation_disposition"]
-                ),
-                cleanup_disposition=cleanup_disposition,
-                guard=None if release_confirmed else guard,
-                guard_token=None if release_confirmed else guard_token,
-            )
-            self._write_tombstone(record, cleanup_record)
-            self.store.waiter_notification_count += 1
-            self.store.condition.notify_all()
+            self._finalize_cleanup(record, cleanup_record)
             return outcome
 
     def audit_context(self, job_id):
@@ -2925,6 +3250,8 @@ class FakeAsyncRestoreJobRegistry:
     def descriptor(self, job_id):
         with self.store.condition:
             record = self._records[job_id]
+            if record["status"] == "cleanup_pending":
+                self._reconcile_cleanup_record(record)
             if record["status"] == "readback_in_progress":
                 while record["status"] == "readback_in_progress":
                     self.store.condition.wait(timeout=2)
@@ -2955,11 +3282,16 @@ class FakeAsyncRestoreJobRegistry:
     def cleanup_record(self, job_id):
         with self.store.condition:
             record = self._records[job_id]
+            completion_event = record["completion_event"]
             cleanup_binding = {
                 "job_id": record["job_id"],
                 "job_generation": record["job_generation"],
                 "operation_binding_sha256": record["operation_binding_sha256"],
-                "terminal_event_id": record["completion_event"]["event_id"],
+                "terminal_event_id": (
+                    completion_event["event_id"]
+                    if completion_event is not None
+                    else record["terminal_event_id"]
+                ),
                 "guard_owner": record["retained_guard_owner"],
                 "guard_generation": record["retained_guard_generation"],
             }
@@ -3659,7 +3991,7 @@ def test_synchronous_pre_close_failure_preserves_primary_result_and_guard_owner(
     assert guard.release_count == 0
     assert guard.conflicting_replace_allowed() is False
     assert cleanup_store.last_record() == {
-        "cleanup_version": "1.0",
+        "cleanup_version": "2.0",
         "cleanup_binding_sha256": cleanup_store.last_record()["cleanup_binding_sha256"],
         "phase": "synchronous_result",
         "disposition": "release_failed_owner_retained",
@@ -3702,6 +4034,72 @@ def test_synchronous_post_close_failure_preserves_primary_and_verified_release()
     assert r"C:\secret" not in serialized
 
 
+def test_synchronous_cleanup_uses_the_same_durable_job_registry():
+    request = _request()
+    confirmation_store = FakeTrustedConfirmationStore()
+    confirmation_store.issue(request, authenticated=True)
+    durable_store = FakeDurableJobStore()
+    workflow = FakeRestoreWorkflow(
+        confirmation_store,
+        FakeOfficialSdkBoundary(),
+        FakeGuardedTargetBoundary(),
+        Barrier(1),
+        durable_store=durable_store,
+    )
+
+    result = workflow.execute(request)
+
+    _validate_result(result)
+    job_id = result["context"]["job"]["job_id"]
+    assert job_id in durable_store.records
+    assert durable_store.records[job_id]["status"] == "terminal"
+    assert durable_store.records[job_id]["guard"] is None
+    assert (
+        durable_store.tombstones[job_id]["cleanup_binding_sha256"]
+        == (workflow.jobs.cleanup_record(job_id)["cleanup_binding_sha256"])
+    )
+    restarted = FakeAsyncRestoreJobRegistry(durable_store)
+    assert restarted.descriptor(job_id) == result["context"]["job"]
+    assert restarted.tombstone(job_id) == workflow.jobs.tombstone(job_id)
+
+
+def test_synchronous_cleanup_crash_reconciles_from_the_durable_registry():
+    request = _request()
+    confirmation_store = FakeTrustedConfirmationStore()
+    confirmation_store.issue(request, authenticated=True)
+    durable_store = FakeDurableJobStore()
+    durable_store.cleanup_store.crash_after_release_once = True
+    sdk = FakeOfficialSdkBoundary()
+    guard = FakeGuardedTargetBoundary()
+    workflow = FakeRestoreWorkflow(
+        confirmation_store,
+        sdk,
+        guard,
+        Barrier(1),
+        durable_store=durable_store,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated crash after guard release"):
+        workflow.execute(request)
+
+    job_id = next(iter(durable_store.records))
+    assert durable_store.records[job_id]["status"] == "cleanup_pending"
+    assert durable_store.records[job_id]["cleanup_pending"]["phase"] == ("synchronous_result")
+    assert guard.release_count == 1
+    assert durable_store.waiter_notification_count == 0
+
+    restarted = FakeAsyncRestoreJobRegistry(durable_store)
+    terminal = restarted.descriptor(job_id)
+
+    assert terminal["status"] == "terminal"
+    assert terminal["cleanup_disposition"] == "released_after_error_verified_closed"
+    assert restarted.tombstone(job_id)["cleanup_disposition"] == (
+        "released_after_error_verified_closed"
+    )
+    assert durable_store.waiter_notification_count == 1
+    assert confirmation_store.consume_count == sdk.dispatch_count == sdk.readback_count == 1
+
+
 @pytest.mark.parametrize(
     ("cleanup_disposition", "handle_retention_owner"),
     (
@@ -3710,6 +4108,10 @@ def test_synchronous_post_close_failure_preserves_primary_and_verified_release()
         (
             "released_after_error_verified_closed",
             "trusted_adapter_local_restore_job_registry",
+        ),
+        (
+            "release_indeterminate_quarantined",
+            "released_after_terminal_readback",
         ),
     ),
 )
@@ -3939,8 +4341,11 @@ def test_target_guard_freezes_exact_confirmed_file_through_dispatch_and_readback
         "swap_attempt_while_pinned": "blocked_by_windows_share_contract",
         "close_semantics": {
             "close_api": "CloseHandle",
-            "false_return": "cleanup_failure",
-            "failed_handle": "retained_by_exact_owner",
+            "false_return": "independently_probe_handle_validity_and_exact_identity",
+            "observations": ["closed", "still_owned", "indeterminate"],
+            "closed": "remove_numeric_handle_and_never_retry",
+            "still_owned": "retain_by_exact_owner",
+            "indeterminate": "quarantine_without_retry_or_release_claim",
             "primary_outcome": "preserved",
         },
         "adversarial_proof": {
@@ -4276,6 +4681,8 @@ def test_contract_records_semantic_gates_not_expressible_in_json_schema():
         "requires_separate_operator_authorization": True,
     }
     assert contract["synchronous_completion"] == {
+        "registry": "same_durable_job_registry_as_async_completion",
+        "guard_record": "persisted_before_confirmation_cas_or_sdk_dispatch",
         "readback_value": "exact_official_sdk_readback_return",
         "synthetic_fixture_success": "forbidden",
         "classification": "shared_guarded_completion_classifier",
@@ -4284,7 +4691,11 @@ def test_contract_records_semantic_gates_not_expressible_in_json_schema():
         "unserializable_readback": "failed_unknown_without_public_payload",
         "failed_unknown_after_receipt": "null",
         "public_payload_projection": "fixed_message_and_error_only",
-        "cleanup_store": "durable_typed_redacted_cleanup_record",
+        "cleanup_store": "durable_exact_guard_bound_cleanup_record_v2",
+        "cleanup_pending": "persisted_before_guard_release",
+        "restart_reconciliation": (
+            "exact_pending_record_to_terminal_tombstone_and_waiter_notification"
+        ),
         "cleanup_failure": "preserve_primary_result_and_retain_owner_until_verified_closed",
     }
 
@@ -4382,17 +4793,26 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
         "release_after_dispatch": "only_after_terminal_readback_or_terminal_unknown_effect",
     }
     assert async_contract["cleanup"] == {
-        "store": "durable_typed_redacted_cleanup_record",
+        "store": "durable_exact_guard_bound_cleanup_record_v2",
         "binding": "sha256_exact_job_generation_operation_event_and_guard_identity",
-        "release_attempt": "under_exact_claim_fence_before_terminal_commit",
+        "pending_state": "cleanup_pending_not_publicly_publishable",
+        "pending_write": "atomic_before_guard_release_under_exact_claim_fence",
+        "release_attempt": "only_after_durable_cleanup_pending",
+        "release_observation": ("independently_verified_closed_still_owned_or_indeterminate"),
+        "restart_reconciliation": (
+            "exact_pending_binding_to_terminal_tombstone_and_waiter_notification"
+        ),
+        "synchronous_path": "same_durable_job_registry_and_cleanup_protocol",
         "dispositions": [
             "not_started",
             "released",
             "release_failed_owner_retained",
             "released_after_error_verified_closed",
+            "release_indeterminate_quarantined",
         ],
         "failure_policy": "preserve_primary_outcome_and_never_claim_false_release",
         "retained_failure_owner": "trusted_adapter_local_restore_job_registry",
+        "indeterminate_owner": "cleanup_ownership_indeterminate_registry_quarantine",
         "terminal_record": "durable_with_cleanup_disposition",
         "tombstone": "always_persisted_for_terminal_outcome",
         "waiter_notification": "always_after_terminal_record_and_tombstone",
@@ -4433,7 +4853,7 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
             "unserializable_receipt": "terminal_failed_unknown_under_exact_claim_fence",
             "after_receipt": "null",
             "public_diagnostic": "fixed_message_and_error_only",
-            "guard_release": "under_exact_claim_fence_before_terminal_commit",
+            "guard_release": "after_durable_exact_guard_bound_cleanup_pending",
             "waiter_notification": ("after_terminal_record_and_tombstone_even_when_cleanup_fails"),
             "duplicate_poll": "return_terminal_without_readback_or_dispatch",
         },
@@ -4452,7 +4872,7 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
             ],
             "completion_cas": "exact_latest_owner_generation_and_fence_revision",
             "guard_recapture": "immediately_before_terminal_cas",
-            "guard_release": "exact_claimed_guard_only_with_typed_cleanup_disposition",
+            "guard_release": "exact_claimed_guard_only_after_durable_cleanup_pending",
             "stale_foreign_or_replaced": "reject_without_commit_or_guard_release",
             "active_claim_cancellation": (
                 "durable_hmac_bound_side_intent_without_job_revision_advance"
@@ -4504,7 +4924,7 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
             },
             "additionalProperties": False,
         },
-        "handles": "released_or_truthfully_retained_by_cleanup_disposition",
+        "handles": "released_retained_or_quarantined_by_typed_cleanup_disposition",
     }
     assert async_contract["transitions"] == {
         "synchronization": "durable_store_compare_and_set_lock",
@@ -4512,8 +4932,8 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
         "event_sequence": "strictly_monotonic_exact_event_order",
         "terminal_immutability": "no_writes_after_terminal",
         "readback_claim": "durable_hmac_owner_generation_and_revision_fence",
-        "completion_commit": "immediate_guard_recapture_then_exact_fence_terminal_cas",
-        "handle_release": "exact_claim_fenced_cleanup_before_terminal_commit",
+        "completion_commit": ("immediate_guard_recapture_then_cleanup_pending_then_terminal_cas"),
+        "handle_release": "only_after_durable_exact_guard_bound_cleanup_pending",
         "cancellation_during_readback_claim": ("fold_exact_durable_side_intent_into_terminal_cas"),
         "readback": "exactly_once_per_job",
         "duplicate_completion": "return_existing_terminal_without_readback",
