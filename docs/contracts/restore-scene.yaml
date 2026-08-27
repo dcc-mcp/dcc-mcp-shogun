@@ -1,4 +1,4 @@
-contract_version: "1.3"
+contract_version: "1.4"
 status: proposed-design-only
 implementation_authorized: false
 
@@ -58,11 +58,12 @@ confirmation_authority:
     - authenticated_issue_to_trusted_store
     - trusted_lookup_by_confirmation_id
     - compare_request_path_receipt_freshness_and_unconsumed
-    - open_and_hold_conflict_denying_target_guard
+    - open_and_pin_volume_root_full_directory_chain_and_target
     - connect_host_and_capture_before_receipt
-    - recapture_same_guarded_handle_identity_and_receipt
+    - recapture_all_pinned_handle_identities_and_target_receipt
+    - reject_any_guard_change_before_consumption
     - atomic_compare_and_set_consume
-    - dispatch_only_for_consume_winner
+    - dispatch_volume_guid_path_while_full_chain_remains_pinned
     - official_sdk_readback_matches_guarded_confirmation_identity
   issuance_record_schema:
     $schema: https://json-schema.org/draft/2020-12/schema
@@ -178,10 +179,19 @@ canonicalization:
   scene_identity:
     version: official-sdk-scene-identity-json-v1
     official_sdk_calls: [GetSceneName, GetFrameCount]
+    get_scene_name_tuple_rule:
+      shape: exactly_two_strings_scene_path_and_name_or_path
+      scene_path: absolute_windows_directory_for_saved_scene
+      full_path: name_or_path_parent_must_equal_scene_path
+      basename: join_name_or_path_to_scene_path
+      relative_path_with_separator: reject
+      scene_name: unicode_nfc_basename_of_name_or_path
+      unsaved_sentinel: ['.', '.vdf']
+      malformed_or_unsaved: reject_before_receipt
     field_sources:
-      scene_name: GetSceneName.name_normalized_to_unicode_nfc
-      frame_count: GetFrameCount.unsigned_integer
-      canonical_path_sha256: GetSceneName.path_resolved_to_guarded_windows_final_path_identity
+      scene_name: GetSceneName[1].unicode_nfc_basename_after_exact_tuple_validation
+      frame_count: GetFrameCount.strict_nonnegative_integer
+      canonical_path_sha256: exact_derived_candidate_resolved_to_guarded_windows_final_path_identity
     members: [canonical_path_sha256, frame_count, scene_name]
     key_order: ascending_unicode_code_point
     encoding: utf-8
@@ -190,24 +200,95 @@ canonicalization:
     insignificant_whitespace: forbidden
     digest: sha256
     golden_vectors:
-      - name: unicode_scene_name
-        official_sdk_observation:
-          scene_name: 镜头_É.vdf
+      - name: full_path_return_shape
+        raw_get_scene_name: ['C:/Approved/recovery', 'C:/Approved/recovery/marked_take.vdf']
+        raw_get_frame_count: 240
+        resolver_input: 'C:\Approved\recovery\marked_take.vdf'
+        handle_observation:
+          final_path: '\\?\C:\Approved\recovery\marked_take.vdf'
+          volume_serial: 00000000A1B2C3D4
+          file_id: 00112233445566778899aabbccddeeff
+        disposition: accept
+        derived_identity:
+          canonical_path_sha256: 77ad3c517a01f7e2351e01328083edef7159d3e5c1c8a31b9dc1e231c27b6ff9
           frame_count: 240
-          canonical_path_sha256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-        canonical_utf8_hex: 7b2263616e6f6e6963616c5f706174685f736861323536223a2264646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464222c226672616d655f636f756e74223a3234302c227363656e655f6e616d65223a22e9959ce5a4b45fc3892e766466227d
-        sha256: 65cc4ddf29fb809c0bf6760edb6429962298e11deed892f7f031d2eaf3915d16
+          scene_name: marked_take.vdf
+        canonical_utf8_hex: 7b2263616e6f6e6963616c5f706174685f736861323536223a2237376164336335313761303166376532333531653031333238303833656465663731353964336535633163386133316239646331653233316332376236666639222c226672616d655f636f756e74223a3234302c227363656e655f6e616d65223a226d61726b65645f74616b652e766466227d
+        sha256: 2d6934cb6e1d5e159780c6fc63f610df91e578856765ab7d7c70ec3b9defb8cb
+      - name: basename_return_shape
+        raw_get_scene_name: ['C:/Approved/recovery', marked_take.vdf]
+        raw_get_frame_count: 240
+        resolver_input: 'C:\Approved\recovery\marked_take.vdf'
+        handle_observation:
+          final_path: '\\?\C:\Approved\recovery\marked_take.vdf'
+          volume_serial: 00000000A1B2C3D4
+          file_id: 00112233445566778899aabbccddeeff
+        disposition: accept
+        derived_identity:
+          canonical_path_sha256: 77ad3c517a01f7e2351e01328083edef7159d3e5c1c8a31b9dc1e231c27b6ff9
+          frame_count: 240
+          scene_name: marked_take.vdf
+        canonical_utf8_hex: 7b2263616e6f6e6963616c5f706174685f736861323536223a2237376164336335313761303166376532333531653031333238303833656465663731353964336535633163386133316239646331653233316332376236666639222c226672616d655f636f756e74223a3234302c227363656e655f6e616d65223a226d61726b65645f74616b652e766466227d
+        sha256: 2d6934cb6e1d5e159780c6fc63f610df91e578856765ab7d7c70ec3b9defb8cb
+      - name: unicode_nfc_full_path
+        raw_get_scene_name: ['C:/Approved/recovery', 'C:/Approved/recovery/镜头_É.vdf']
+        raw_get_frame_count: 1
+        resolver_input: 'C:\Approved\recovery\镜头_É.vdf'
+        handle_observation:
+          final_path: '\\?\C:\Approved\recovery\镜头_É.vdf'
+          volume_serial: 00000000A1B2C3D4
+          file_id: 102132435465768798a9bacbdcedfe0f
+        disposition: accept
+        derived_identity:
+          canonical_path_sha256: ae307b5b7fb93751cf4589859caaa6a60fe096ed73b0eb5cf504519734dbfd0f
+          frame_count: 1
+          scene_name: 镜头_É.vdf
+        canonical_utf8_hex: 7b2263616e6f6e6963616c5f706174685f736861323536223a2261653330376235623766623933373531636634353839383539636161613661363066653039366564373362306562356366353034353139373334646266643066222c226672616d655f636f756e74223a312c227363656e655f6e616d65223a22e9959ce5a4b45fc3892e766466227d
+        sha256: 2e1ad1af8be0387730b0db8d4773a5902cf52799238be83a97d1e411223f2730
+      - name: unsaved_dot_vdf
+        raw_get_scene_name: ['.', '.vdf']
+        raw_get_frame_count: 0
+        disposition: reject_unsaved_scene
+      - name: malformed_parent_mismatch
+        raw_get_scene_name: ['C:/Approved/recovery', 'C:/Approved/other/marked_take.vdf']
+        raw_get_frame_count: 240
+        disposition: reject_scene_path_parent_mismatch
+      - name: negative_frame_count
+        raw_get_scene_name: ['C:/Approved/recovery', marked_take.vdf]
+        raw_get_frame_count: -1
+        disposition: reject_negative_frame_count
 
 target_guard:
+  strategy: pin_full_windows_namespace_chain_through_dispatch
   open_api: CreateFileW
-  desired_access: [GENERIC_READ, FILE_READ_ATTRIBUTES]
+  dispatch_path_api: GetFinalPathNameByHandleW_VOLUME_NAME_GUID
+  directory_desired_access: [FILE_READ_ATTRIBUTES]
+  directory_flags: [FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT]
+  target_desired_access: [GENERIC_READ, FILE_READ_ATTRIBUTES]
   share_mode: [FILE_SHARE_READ]
   creation_disposition: OPEN_EXISTING
+  pinned_objects:
+    - volume_root
+    - every_directory_component_including_trusted_root
+    - target_file
   deny_conflicting_access: [write, delete, rename, replace]
   identity_fields: [canonical_path_sha256, volume_serial, file_id]
-  hold_from: preflight_identity_and_receipt_match
+  dispatch_path: volume_guid_final_path_derived_from_pinned_target
+  sdk_dispatch: path_only_while_entire_namespace_chain_remains_pinned
+  hold_from: before_first_namespace_identity_capture
   hold_until: terminal_official_sdk_readback_or_unknown_effect
-  predispatch_recapture: same_guarded_handle_immediately_before_confirmation_cas
+  validation_checkpoints:
+    - after_official_sdk_before_receipt_capture_completed
+    - after_all_pinned_handle_and_target_receipt_recapture
+    - immediately_before_confirmation_cas
+    - dispatch_entry_with_full_chain_still_held
+  predispatch_recapture: all_pinned_handle_identities_and_target_receipt_immediately_before_confirmation_cas
+  change_before_cas: target_guard_rejected_without_consume_or_dispatch
+  swap_attempt_while_pinned: blocked_by_windows_share_contract
+  adversarial_proof:
+    phases: [preflight, recapture, cas, dispatch]
+    swap_kinds: [namespace, junction, parent, same_content]
+    predispatch_change_invariant: consume_count_equals_dispatch_count_equals_zero
   readback_match: official_sdk_active_scene_to_guarded_confirmation_identity
 
 input_schema:

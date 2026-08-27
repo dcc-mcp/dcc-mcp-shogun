@@ -163,6 +163,27 @@ def _result(state: str):
                 "after_receipt": None,
             },
         }
+    if state == "target_guard_rejected":
+        return {
+            "success": False,
+            "message": "Guarded target identity could not be reconfirmed before dispatch.",
+            "prompt": None,
+            "error": "RestoreTargetGuardRejected",
+            "context": {
+                "receipt_version": "1.0",
+                "request_id": "restore-0001",
+                "state": state,
+                "effect": "unknown",
+                "replay_allowed": False,
+                "host_connection_performed": True,
+                "before_receipt_captured": True,
+                "dispatch_performed": False,
+                "confirmation_consumed": False,
+                "guard_outcome": "predispatch_identity_or_receipt_mismatch",
+                "before_receipt": before,
+                "after_receipt": None,
+            },
+        }
     return {
         "success": False,
         "message": "Recovery scene restore did not reach verified success.",
@@ -267,6 +288,51 @@ def _scene_identity_binding(observation):
         sort_keys=True,
     ).encode("utf-8")
     return canonical_bytes, hashlib.sha256(canonical_bytes).hexdigest()
+
+
+def _scene_identity_from_raw(get_scene_name_result, frame_count, resolver):
+    if (
+        not isinstance(get_scene_name_result, tuple)
+        or len(get_scene_name_result) != 2
+        or not all(isinstance(item, str) for item in get_scene_name_result)
+    ):
+        raise ValueError("GetSceneName must return exactly two strings")
+    if type(frame_count) is not int or frame_count < 0:
+        raise ValueError("GetFrameCount must return a nonnegative integer")
+
+    scene_path, name_or_path = (
+        unicodedata.normalize("NFC", item) for item in get_scene_name_result
+    )
+    if [scene_path, name_or_path] == [".", ".vdf"]:
+        raise ValueError("unsaved scene sentinel cannot produce a receipt")
+
+    normalized_scene_path = ntpath.normpath(scene_path.replace("/", "\\"))
+    scene_drive, scene_tail = ntpath.splitdrive(normalized_scene_path)
+    if not scene_drive or not scene_tail.startswith("\\"):
+        raise ValueError("scene path must be an absolute Windows directory")
+
+    normalized_name_or_path = ntpath.normpath(name_or_path.replace("/", "\\"))
+    name_drive, name_tail = ntpath.splitdrive(normalized_name_or_path)
+    if name_drive and name_tail.startswith("\\"):
+        candidate_path = normalized_name_or_path
+        if _normalize_final_path(ntpath.dirname(candidate_path)) != _normalize_final_path(
+            normalized_scene_path
+        ):
+            raise ValueError("scene path parent mismatch")
+    elif "\\" not in name_or_path and "/" not in name_or_path:
+        candidate_path = ntpath.join(normalized_scene_path, normalized_name_or_path)
+    else:
+        raise ValueError("relative scene name must not contain a path separator")
+
+    scene_name = unicodedata.normalize("NFC", ntpath.basename(normalized_name_or_path))
+    if len(scene_name) <= 4 or not scene_name.lower().endswith(".vdf"):
+        raise ValueError("saved scene name must be a bounded VDF basename")
+    evidence = resolver.resolve(candidate_path)
+    return {
+        "canonical_path_sha256": evidence["sha256"],
+        "frame_count": frame_count,
+        "scene_name": scene_name,
+    }
 
 
 class FakeTrustedPathResolver:
@@ -405,15 +471,18 @@ class FakeOfficialSdkBoundary:
         self.before_capture_count = 0
         self.dispatch_count = 0
         self.readback_count = 0
+        self.dispatch_evidence = []
 
     def capture_before(self):
         with self._lock:
             self.before_capture_count += 1
         return _scene_receipt("working_scene.vdf", "b" * 64, "c" * 64)
 
-    def dispatch_restore(self):
+    def dispatch_restore(self, dispatch_capability):
+        assert dispatch_capability["held"] is True
         with self._lock:
             self.dispatch_count += 1
+            self.dispatch_evidence.append(dict(dispatch_capability))
 
     def readback_after(self):
         with self._lock:
@@ -421,23 +490,96 @@ class FakeOfficialSdkBoundary:
 
 
 class FakeGuardedTargetBoundary:
-    def __init__(self):
+    PINNED_OBJECTS = (
+        "volume_root",
+        "trusted_root",
+        "recovery_directory",
+        "target_file",
+    )
+
+    def __init__(
+        self,
+        *,
+        attempt_phase=None,
+        observed_change_phase=None,
+        attack_kind=None,
+    ):
         self._lock = Lock()
         self.open_count = 0
         self.recapture_count = 0
         self.release_count = 0
         self._active_count = 0
+        self.attempt_phase = attempt_phase
+        self.observed_change_phase = observed_change_phase
+        self.attack_kind = attack_kind
+        self.attack_log = []
+        self.changed_objects = []
+        self.baseline_namespace_identity = {
+            "volume_root": {"object_id": "volume-root-1"},
+            "trusted_root": {"object_id": "trusted-root-1"},
+            "recovery_directory": {"object_id": "recovery-directory-1"},
+            "target_file": {
+                "object_id": "target-file-1",
+                "content_sha256": "a" * 64,
+            },
+        }
+        self.current_namespace_identity = {
+            name: dict(identity) for name, identity in self.baseline_namespace_identity.items()
+        }
 
     def open(self):
         with self._lock:
             self.open_count += 1
             self._active_count += 1
-        return {"held": True}
+        return {
+            "held": True,
+            "dispatch_path": r"\\?\Volume{approved}\recovery\marked_take.vdf",
+            "pinned_objects": self.PINNED_OBJECTS,
+            "namespace_identity": {
+                name: dict(identity) for name, identity in self.current_namespace_identity.items()
+            },
+        }
 
     def recapture(self, token):
         assert token["held"] is True
         with self._lock:
             self.recapture_count += 1
+
+    def checkpoint_identity(self, token, phase):
+        assert token["held"] is True
+        if self.observed_change_phase == phase:
+            changed_object = {
+                "namespace": "volume_root",
+                "junction": "trusted_root",
+                "parent": "recovery_directory",
+                "same_content": "target_file",
+            }[self.attack_kind]
+            self.current_namespace_identity[changed_object]["object_id"] += "-swapped"
+            self.changed_objects.append(changed_object)
+            self.attack_log.append(
+                {
+                    "phase": phase,
+                    "kind": self.attack_kind,
+                    "outcome": "identity_changed",
+                }
+            )
+        if self.attempt_phase == phase:
+            self.attack_log.append(
+                {
+                    "phase": phase,
+                    "kind": self.attack_kind,
+                    "outcome": "blocked_by_pinned_chain",
+                }
+            )
+        return self.current_namespace_identity == token["namespace_identity"]
+
+    def dispatch_capability(self, token):
+        assert self.checkpoint_identity(token, "dispatch")
+        return {
+            "dispatch_path": token["dispatch_path"],
+            "pinned_objects": token["pinned_objects"],
+            "held": token["held"],
+        }
 
     def conflicting_replace_allowed(self):
         with self._lock:
@@ -463,36 +605,51 @@ class FakeRestoreWorkflow:
         ticket = self.store.trusted_lookup_and_compare(request)
         assert ticket is not None
         guard_token = self.guard.open()
-        before_receipt = self.sdk.capture_before()
-        self.guard.recapture(guard_token)
-        self.conflicting_replace_observations.append(self.guard.conflicting_replace_allowed())
-        self.before_cas_barrier.wait()
-        if not self.store.cas_consume(ticket):
-            result = _result("confirmation_consume_rejected")
+        try:
+            before_receipt = self.sdk.capture_before()
+            if not self.guard.checkpoint_identity(guard_token, "preflight"):
+                result = _result("target_guard_rejected")
+                result["context"]["before_receipt"] = before_receipt
+                return result
+            self.guard.recapture(guard_token)
+            if not self.guard.checkpoint_identity(guard_token, "recapture"):
+                result = _result("target_guard_rejected")
+                result["context"]["before_receipt"] = before_receipt
+                return result
+            self.conflicting_replace_observations.append(self.guard.conflicting_replace_allowed())
+            self.before_cas_barrier.wait()
+            if not self.guard.checkpoint_identity(guard_token, "cas"):
+                result = _result("target_guard_rejected")
+                result["context"]["before_receipt"] = before_receipt
+                return result
+            if not self.store.cas_consume(ticket):
+                result = _result("confirmation_consume_rejected")
+                result["context"]["before_receipt"] = before_receipt
+                return result
+            self.sdk.dispatch_restore(self.guard.dispatch_capability(guard_token))
+            self.sdk.readback_after()
+            result = _result("succeeded")
+            result["context"]["approved_target_identity"] = ticket["approved_target_identity"]
+            result["context"]["after_receipt"]["target_identity"] = ticket[
+                "approved_target_identity"
+            ]
+            after_identity_fields = result["context"]["after_receipt"]["scene_identity_fields"]
+            after_identity_fields["canonical_path_sha256"] = ticket["approved_target_identity"][
+                "canonical_path_sha256"
+            ]
+            result["context"]["after_receipt"]["scene_identity_sha256"] = _scene_identity_binding(
+                after_identity_fields
+            )[1]
             result["context"]["before_receipt"] = before_receipt
-            self.guard.release(guard_token)
             return result
-        self.sdk.dispatch_restore()
-        self.sdk.readback_after()
-        result = _result("succeeded")
-        result["context"]["approved_target_identity"] = ticket["approved_target_identity"]
-        result["context"]["after_receipt"]["target_identity"] = ticket["approved_target_identity"]
-        after_identity_fields = result["context"]["after_receipt"]["scene_identity_fields"]
-        after_identity_fields["canonical_path_sha256"] = ticket["approved_target_identity"][
-            "canonical_path_sha256"
-        ]
-        result["context"]["after_receipt"]["scene_identity_sha256"] = _scene_identity_binding(
-            after_identity_fields
-        )[1]
-        result["context"]["before_receipt"] = before_receipt
-        self.guard.release(guard_token)
-        return result
+        finally:
+            self.guard.release(guard_token)
 
 
 def test_restore_contract_is_design_only_and_fail_closed():
     contract = _contract()
 
-    assert contract["contract_version"] == "1.3"
+    assert contract["contract_version"] == "1.4"
     assert contract["status"] == "proposed-design-only"
     assert contract["implementation_authorized"] is False
     assert contract["operation"] == {
@@ -580,6 +737,7 @@ def test_restore_request_has_no_code_or_ui_escape_hatch():
         "succeeded",
         "failed_unchanged",
         "confirmation_consume_rejected",
+        "target_guard_rejected",
         "failed_unknown",
         "timed_out",
         "indeterminate",
@@ -772,6 +930,93 @@ def test_concurrent_restore_workflows_consume_and_dispatch_exactly_once():
     assert loser_result["context"]["effect"] == "unknown"
 
 
+@pytest.mark.parametrize("phase", ("preflight", "recapture", "cas"))
+@pytest.mark.parametrize("attack_kind", ("namespace", "junction", "parent", "same_content"))
+def test_windows_namespace_change_before_cas_rejects_without_consume_or_dispatch(
+    phase, attack_kind
+):
+    request = _request()
+    store = FakeTrustedConfirmationStore()
+    store.issue(request, authenticated=True)
+    sdk = FakeOfficialSdkBoundary()
+    guard = FakeGuardedTargetBoundary(
+        observed_change_phase=phase,
+        attack_kind=attack_kind,
+    )
+    workflow = FakeRestoreWorkflow(store, sdk, guard, Barrier(1))
+
+    result = workflow.execute(request)
+
+    assert result["context"]["state"] == "target_guard_rejected"
+    assert store.consume_count == sdk.dispatch_count == 0
+    assert sdk.readback_count == 0
+    assert guard.release_count == 1
+    assert guard.attack_log == [
+        {
+            "phase": phase,
+            "kind": attack_kind,
+            "outcome": "identity_changed",
+        }
+    ]
+    changed_object = {
+        "namespace": "volume_root",
+        "junction": "trusted_root",
+        "parent": "recovery_directory",
+        "same_content": "target_file",
+    }[attack_kind]
+    assert guard.changed_objects == [changed_object]
+    assert guard.current_namespace_identity != guard.baseline_namespace_identity
+    if attack_kind == "same_content":
+        assert (
+            guard.current_namespace_identity["target_file"]["content_sha256"]
+            == (guard.baseline_namespace_identity["target_file"]["content_sha256"])
+        )
+        assert (
+            guard.current_namespace_identity["target_file"]["object_id"]
+            != (guard.baseline_namespace_identity["target_file"]["object_id"])
+        )
+    _validate_result(result)
+
+
+@pytest.mark.parametrize("phase", ("preflight", "recapture", "cas", "dispatch"))
+@pytest.mark.parametrize("attack_kind", ("namespace", "junction", "parent", "same_content"))
+def test_windows_swap_attempt_is_blocked_by_full_pinned_chain_through_dispatch(phase, attack_kind):
+    request = _request()
+    store = FakeTrustedConfirmationStore()
+    store.issue(request, authenticated=True)
+    sdk = FakeOfficialSdkBoundary()
+    guard = FakeGuardedTargetBoundary(attempt_phase=phase, attack_kind=attack_kind)
+    workflow = FakeRestoreWorkflow(store, sdk, guard, Barrier(1))
+
+    result = workflow.execute(request)
+
+    assert result["context"]["state"] == "succeeded"
+    assert store.consume_count == sdk.dispatch_count == sdk.readback_count == 1
+    assert guard.attack_log == [
+        {
+            "phase": phase,
+            "kind": attack_kind,
+            "outcome": "blocked_by_pinned_chain",
+        }
+    ]
+    assert guard.changed_objects == []
+    assert guard.current_namespace_identity == guard.baseline_namespace_identity
+    assert sdk.dispatch_evidence == [
+        {
+            "dispatch_path": r"\\?\Volume{approved}\recovery\marked_take.vdf",
+            "pinned_objects": (
+                "volume_root",
+                "trusted_root",
+                "recovery_directory",
+                "target_file",
+            ),
+            "held": True,
+        }
+    ]
+    assert guard.release_count == 1
+    _validate_result(result)
+
+
 def test_confirmation_authority_defines_trusted_issuance_lookup_compare_and_consume():
     authority = _contract()["confirmation_authority"]
 
@@ -794,11 +1039,12 @@ def test_confirmation_authority_defines_trusted_issuance_lookup_compare_and_cons
         "authenticated_issue_to_trusted_store",
         "trusted_lookup_by_confirmation_id",
         "compare_request_path_receipt_freshness_and_unconsumed",
-        "open_and_hold_conflict_denying_target_guard",
+        "open_and_pin_volume_root_full_directory_chain_and_target",
         "connect_host_and_capture_before_receipt",
-        "recapture_same_guarded_handle_identity_and_receipt",
+        "recapture_all_pinned_handle_identities_and_target_receipt",
+        "reject_any_guard_change_before_consumption",
         "atomic_compare_and_set_consume",
-        "dispatch_only_for_consume_winner",
+        "dispatch_volume_guid_path_while_full_chain_remains_pinned",
         "official_sdk_readback_matches_guarded_confirmation_identity",
     ]
 
@@ -807,15 +1053,41 @@ def test_target_guard_freezes_exact_confirmed_file_through_dispatch_and_readback
     guard = _contract()["target_guard"]
 
     assert guard == {
+        "strategy": "pin_full_windows_namespace_chain_through_dispatch",
         "open_api": "CreateFileW",
-        "desired_access": ["GENERIC_READ", "FILE_READ_ATTRIBUTES"],
+        "dispatch_path_api": "GetFinalPathNameByHandleW_VOLUME_NAME_GUID",
+        "directory_desired_access": ["FILE_READ_ATTRIBUTES"],
+        "directory_flags": ["FILE_FLAG_BACKUP_SEMANTICS", "FILE_FLAG_OPEN_REPARSE_POINT"],
+        "target_desired_access": ["GENERIC_READ", "FILE_READ_ATTRIBUTES"],
         "share_mode": ["FILE_SHARE_READ"],
         "creation_disposition": "OPEN_EXISTING",
+        "pinned_objects": [
+            "volume_root",
+            "every_directory_component_including_trusted_root",
+            "target_file",
+        ],
         "deny_conflicting_access": ["write", "delete", "rename", "replace"],
         "identity_fields": ["canonical_path_sha256", "volume_serial", "file_id"],
-        "hold_from": "preflight_identity_and_receipt_match",
+        "dispatch_path": "volume_guid_final_path_derived_from_pinned_target",
+        "sdk_dispatch": "path_only_while_entire_namespace_chain_remains_pinned",
+        "hold_from": "before_first_namespace_identity_capture",
         "hold_until": "terminal_official_sdk_readback_or_unknown_effect",
-        "predispatch_recapture": "same_guarded_handle_immediately_before_confirmation_cas",
+        "validation_checkpoints": [
+            "after_official_sdk_before_receipt_capture_completed",
+            "after_all_pinned_handle_and_target_receipt_recapture",
+            "immediately_before_confirmation_cas",
+            "dispatch_entry_with_full_chain_still_held",
+        ],
+        "predispatch_recapture": (
+            "all_pinned_handle_identities_and_target_receipt_immediately_before_confirmation_cas"
+        ),
+        "change_before_cas": "target_guard_rejected_without_consume_or_dispatch",
+        "swap_attempt_while_pinned": "blocked_by_windows_share_contract",
+        "adversarial_proof": {
+            "phases": ["preflight", "recapture", "cas", "dispatch"],
+            "swap_kinds": ["namespace", "junction", "parent", "same_content"],
+            "predispatch_change_invariant": "consume_count_equals_dispatch_count_equals_zero",
+        },
         "readback_match": "official_sdk_active_scene_to_guarded_confirmation_identity",
     }
 
@@ -931,32 +1203,78 @@ def test_unicode_receipt_has_cross_language_golden_bytes_and_digest():
     assert vector["sha256"] == composed_digest
 
 
-def test_scene_identity_has_stable_official_sdk_fields_and_golden_digest():
+def test_scene_identity_is_derived_from_raw_get_scene_name_shapes_and_golden_digests():
     identity_contract = _contract()["canonicalization"]["scene_identity"]
-    vector = identity_contract["golden_vectors"][0]
-    decomposed = dict(vector["official_sdk_observation"])
-    decomposed["scene_name"] = "镜头_É.vdf"
-    canonical_bytes, digest = _scene_identity_binding(vector["official_sdk_observation"])
-    decomposed_bytes, decomposed_digest = _scene_identity_binding(decomposed)
 
     assert identity_contract["official_sdk_calls"] == ["GetSceneName", "GetFrameCount"]
+    assert identity_contract["get_scene_name_tuple_rule"] == {
+        "shape": "exactly_two_strings_scene_path_and_name_or_path",
+        "scene_path": "absolute_windows_directory_for_saved_scene",
+        "full_path": "name_or_path_parent_must_equal_scene_path",
+        "basename": "join_name_or_path_to_scene_path",
+        "relative_path_with_separator": "reject",
+        "scene_name": "unicode_nfc_basename_of_name_or_path",
+        "unsaved_sentinel": [".", ".vdf"],
+        "malformed_or_unsaved": "reject_before_receipt",
+    }
     assert identity_contract["members"] == [
         "canonical_path_sha256",
         "frame_count",
         "scene_name",
     ]
-    assert decomposed_bytes == canonical_bytes
-    assert decomposed_digest == digest
-    assert vector["canonical_utf8_hex"] == canonical_bytes.hex()
-    assert vector["sha256"] == digest
-    for changed_field, changed_value in (
-        ("scene_name", "other_take.vdf"),
-        ("frame_count", 241),
-        ("canonical_path_sha256", "e" * 64),
-    ):
-        changed = dict(vector["official_sdk_observation"])
-        changed[changed_field] = changed_value
-        assert _scene_identity_binding(changed)[1] != digest
+    accepted = [
+        vector
+        for vector in identity_contract["golden_vectors"]
+        if vector["disposition"] == "accept"
+    ]
+    assert [vector["name"] for vector in accepted] == [
+        "full_path_return_shape",
+        "basename_return_shape",
+        "unicode_nfc_full_path",
+    ]
+    derived = []
+    for vector in accepted:
+        resolver = FakeTrustedPathResolver()
+        resolver.add(vector["resolver_input"], **vector["handle_observation"])
+
+        identity = _scene_identity_from_raw(
+            tuple(vector["raw_get_scene_name"]),
+            vector["raw_get_frame_count"],
+            resolver,
+        )
+        canonical_bytes, digest = _scene_identity_binding(identity)
+
+        assert identity == vector["derived_identity"]
+        assert vector["canonical_utf8_hex"] == canonical_bytes.hex()
+        assert vector["sha256"] == digest
+        derived.append(identity)
+
+    assert derived[0] == derived[1]
+    assert derived[2]["scene_name"] == "镜头_É.vdf"
+
+
+@pytest.mark.parametrize(
+    ("vector_name", "error_match"),
+    (
+        ("unsaved_dot_vdf", "unsaved scene"),
+        ("malformed_parent_mismatch", "scene path parent mismatch"),
+        ("negative_frame_count", "nonnegative integer"),
+    ),
+)
+def test_scene_identity_rejects_unsaved_malformed_and_negative_raw_observations(
+    vector_name, error_match
+):
+    identity_contract = _contract()["canonicalization"]["scene_identity"]
+    vector = next(
+        item for item in identity_contract["golden_vectors"] if item["name"] == vector_name
+    )
+
+    with pytest.raises(ValueError, match=error_match):
+        _scene_identity_from_raw(
+            tuple(vector["raw_get_scene_name"]),
+            vector["raw_get_frame_count"],
+            FakeTrustedPathResolver(),
+        )
 
 
 def test_scene_receipt_rejects_digest_not_derived_from_its_sdk_observation():
@@ -1059,6 +1377,9 @@ def test_adr_preserves_the_design_only_acceptance_boundary():
         "golden vectors",
         "CreateFileW",
         "FILE_SHARE_READ",
+        "full directory chain",
+        "volume-GUID path",
+        "same-content replacement",
         "target_guard_rejected",
         "atomic insert-if-absent",
         "permanently nonreusable",
@@ -1066,6 +1387,9 @@ def test_adr_preserves_the_design_only_acceptance_boundary():
         "consume_count == dispatch_count == 1",
         "GetSceneName",
         "GetFrameCount",
+        "name-or-path",
+        '(".", ".vdf")',
+        "strict nonnegative integer",
         "timestamps",
         "disposable marked take",
         "Refs #36",

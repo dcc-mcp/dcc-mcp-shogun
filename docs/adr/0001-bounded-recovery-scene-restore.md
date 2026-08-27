@@ -34,10 +34,13 @@ trusted-root containment and receipt preflight
 trusted confirmation lookup/compare -> official SDK before receipt
                     |
                     v
+full Windows namespace chain remains pinned
+       | change: target_guard_rejected, no consume or dispatch
+                    v
 atomic single-use confirmation consumption
        | CAS loss: confirmation_consume_rejected, no dispatch
        v exactly one winner
-one official SDK dispatch
+one official SDK path dispatch while the chain remains pinned
                     |
                     v
 poll/read only; never replay -> official SDK active-scene read-back
@@ -69,19 +72,33 @@ before/after terminal receipt or explicit unknown effect
   `receipt_version`, scene identity (`file_name`), `file_size_bytes`, `sha256`,
   and `active_scene_changed=false`. The canonical target basename, current byte
   count, and freshly computed SHA-256 must match before dispatch.
-- Open the resolved target with `CreateFileW`, `GENERIC_READ` plus
-  `FILE_READ_ATTRIBUTES`, `OPEN_EXISTING`, and only `FILE_SHARE_READ`. Treat an
-  incompatible existing writer as rejection; while held, this share mode denies
-  conflicting write, delete, rename, and replacement opens. Keep this guarded
-  handle from the preflight identity/receipt match through dispatch and terminal
-  official SDK read-back (or an unknown-effect terminal result).
-- Immediately before confirmation CAS, recapture final path identity, volume
-  serial, 128-bit file ID, bytes, and content digest from that same guarded
-  handle. Any difference from the confirmation record or recovery receipt fails
-  closed without consuming or dispatching. Because host connection and before
-  capture may already have occurred, this path returns `target_guard_rejected`
-  with unknown effect, the bounded before receipt, null after receipt, and both
-  consumption and dispatch false.
+- The official SDK consumes a path, so holding only the target file handle does
+  not close path-dispatch TOCTOU. Before the first namespace identity capture,
+  open and retain the full directory chain from the volume root through the
+  trusted root and every target ancestor, plus the target file. Directory opens
+  use `CreateFileW`, `FILE_READ_ATTRIBUTES`, `FILE_FLAG_BACKUP_SEMANTICS`,
+  `FILE_FLAG_OPEN_REPARSE_POINT`, `OPEN_EXISTING`, and only
+  `FILE_SHARE_READ`. The target open adds `GENERIC_READ`. Treat an incompatible
+  existing writer as rejection; the retained share contract denies conflicting
+  write, delete, rename, junction retargeting, and replacement opens on every
+  path component.
+- Derive the SDK argument as a handle-backed volume-GUID path and keep the
+  complete chain pinned through path dispatch and terminal official SDK
+  read-back (or an unknown-effect terminal result). A drive-letter path, caller
+  spelling, or path reconstructed after releasing an ancestor is not dispatch
+  authority.
+- Revalidate all pinned directory and target identities after the official SDK
+  before receipt is captured, after recapturing target bytes and digest, and
+  immediately before confirmation CAS. The dispatch boundary additionally
+  asserts that every pin is still held. The executable adversarial matrix tries
+  namespace, junction, parent-directory, and same-content replacement swaps at
+  preflight, recapture, CAS, and dispatch. Attempts while the chain is pinned
+  must be blocked; any observed pre-dispatch identity or receipt change fails
+  closed without consuming or dispatching.
+- A detected change after host connection returns `target_guard_rejected` with
+  unknown effect, the bounded before receipt, null after receipt, and both
+  confirmation consumption and SDK dispatch false. The executable invariant is
+  `consume_count == dispatch_count == 0` for every such trace.
 - Validate all fields before connecting to a host. A mismatch is a preflight
   failure and must not consume mutation authority. `preflight_rejected` is the
   legal terminal result for every precondition failure and records
@@ -140,15 +157,24 @@ before/after terminal receipt or explicit unknown effect
   the confirmation. Verified success requires an `after_receipt` from a fresh
   official SDK read-back. Both receipts include SDK scene identity and bounded
   filesystem name, byte-count, and SHA-256 evidence.
-- `scene_identity_sha256` is not an opaque implementation choice. It is the
-  SHA-256 of compact, sorted-key UTF-8 JSON containing exactly the Unicode-NFC
-  scene name from `GetSceneName`, unsigned frame count from `GetFrameCount`, and
-  canonical-path SHA-256 obtained by resolving the path returned by
-  `GetSceneName` to the guarded Windows final-path identity. The contract's
-  positive Unicode golden vector and independent name/frame/path negative
-  observations are normative; timestamps, random values, object addresses, and
-  nondeterministic serialization are forbidden. The SDK-derived scene name must
-  also equal the receipt's bounded `file_name`.
+- `scene_identity_sha256` is not an opaque implementation choice. Treat
+  `GetSceneName` as an exact two-string `(scene_path, name-or-path)` tuple. For a
+  saved scene, `scene_path` is an absolute Windows directory. If the second
+  value is an absolute full path, its parent must equal `scene_path`; if it is a
+  separator-free basename, join it to `scene_path`. Reject any other relative
+  path, malformed tuple, parent contradiction, or the unsaved sentinel
+  `(".", ".vdf")` before constructing a receipt.
+- Derive the bounded `scene_name` as the Unicode NFC basename of the tuple's
+  second value, never as that raw full path. Resolve the exact derived candidate
+  to the guarded Windows final-path identity for `canonical_path_sha256`, and
+  accept `GetFrameCount` only as a strict nonnegative integer. Then hash compact,
+  sorted-key UTF-8 JSON containing exactly `canonical_path_sha256`,
+  `frame_count`, and `scene_name`. Independent golden vectors start from raw
+  full-path, basename, and decomposed-Unicode observations; rejection vectors
+  cover the unsaved sentinel, malformed parent path, and negative frame count;
+  timestamps, random values, object addresses, and nondeterministic
+  serialization are forbidden. The derived scene name must also equal the
+  receipt's bounded `file_name`.
 - `confirmation_consume_rejected` is the CAS-loss connected-but-not-dispatched
   terminal state. It reports `effect=unknown` because the winning concurrent
   consumer may dispatch after this request's before capture; it does not claim
