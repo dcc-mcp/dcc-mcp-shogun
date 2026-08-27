@@ -1,4 +1,4 @@
-contract_version: "1.1"
+contract_version: "1.2"
 status: proposed-design-only
 implementation_authorized: false
 
@@ -42,11 +42,18 @@ confirmation_authority:
     - canonical_trusted_root_sha256
     - canonical_path_sha256
     - recovery_receipt_binding_sha256
-  path_canonicalization: windows_final_path_casefold_utf8_v1
-  receipt_canonicalization: sorted_compact_json_utf8_v1
+  path_canonicalization: windows_handle_final_path_identity_v1
+  receipt_canonicalization: nfc_sorted_compact_json_utf8_v1
   digest_algorithm: sha256_utf8_canonical_v1
   max_ttl_seconds: 300
   consume: atomic_compare_and_set_unconsumed_before_dispatch
+  state_machine:
+    - authenticated_issue_to_trusted_store
+    - trusted_lookup_by_confirmation_id
+    - compare_request_path_receipt_freshness_and_unconsumed
+    - connect_host_and_capture_before_receipt
+    - atomic_compare_and_set_consume
+    - dispatch_only_for_consume_winner
   issuance_record_schema:
     $schema: https://json-schema.org/draft/2020-12/schema
     type: object
@@ -62,6 +69,7 @@ confirmation_authority:
       - destructive_acknowledged
       - non_idempotent_acknowledged
       - consumed
+      - revision
     properties:
       record_version: {type: string, const: "1.0"}
       confirmation_id:
@@ -82,7 +90,77 @@ confirmation_authority:
       destructive_acknowledged: {type: boolean, const: true}
       non_idempotent_acknowledged: {type: boolean, const: true}
       consumed: {type: boolean}
+      revision: {type: integer, minimum: 1}
     additionalProperties: false
+
+canonicalization:
+  windows_final_path:
+    version: windows-final-path-v1
+    authority: trusted_windows_handle_resolver
+    final_path_source: GetFinalPathNameByHandleW_FILE_NAME_NORMALIZED
+    device_identity_source: volume_serial_and_128_bit_file_id_from_open_handle
+    raw_path_rules:
+      - reject_device_namespace_and_alternate_data_streams
+      - collapse_dot_segments_before_open
+      - inspect_every_reparse_component_and_require_approved_target
+      - compare_handle_derived_final_root_and_target_on_same_volume
+      - require_final_target_containment_under_final_trusted_root
+    final_path_normalization:
+      - strip_extended_length_prefix
+      - convert_extended_unc_prefix_to_unc
+      - use_backslash_separator
+      - unicode_nfc
+      - ascii_case_fold_only
+    binding_payload: |-
+      windows-final-path-v1
+      volume_serial={16 uppercase hex digits}
+      file_id={32 lowercase hex digits}
+      path={normalized handle-derived final path}
+    encoding: utf-8
+    digest: sha256
+    golden_vectors:
+      - name: unicode_dotdot_alias_same_handle_identity
+        raw_aliases:
+          - 'C:/Approved/shots/../shots/镜头_É.vdf'
+          - 'c:\approved\shots\镜头_É.vdf'
+        final_path: '\\?\C:\Approved\shots\镜头_É.vdf'
+        volume_serial: 00000000A1B2C3D4
+        file_id: 00112233445566778899aabbccddeeff
+        canonical_utf8_hex: 77696e646f77732d66696e616c2d706174682d76310a766f6c756d655f73657269616c3d303030303030303041314232433344340a66696c655f69643d30303131323233333434353536363737383839396161626263636464656566660a706174683d633a5c617070726f7665645c73686f74735ce9959ce5a4b45fc3892e766466
+        sha256: ba82b4305ccab53ae1e023659d21fee8e3361b031c6abc4a4c2d9c226986104a
+      - name: unapproved_reparse_device_identity_rejected
+        raw_aliases: ['C:/Approved/shots/reparse/镜头_É.vdf']
+        final_path: '\\?\D:\outside\镜头_É.vdf'
+        volume_serial: 00000000D4C3B2A1
+        file_id: 99990000aaaabbbbccccddddeeeeffff
+        disposition: reject_unapproved_reparse_or_device_identity
+  recovery_receipt:
+    version: recovery-receipt-json-v1
+    members:
+      - active_scene_changed
+      - file_name
+      - file_size_bytes
+      - receipt_version
+      - sha256
+    string_normalization: unicode_nfc
+    key_order: ascending_unicode_code_point
+    encoding: utf-8
+    ensure_ascii: false
+    separators: [comma, colon]
+    insignificant_whitespace: forbidden
+    number_format: unsigned_base10_integer_without_leading_zero
+    boolean_format: lowercase_json_literal
+    digest: sha256
+    golden_vectors:
+      - name: unicode_filename_nfc
+        receipt:
+          receipt_version: 1
+          file_name: 镜头_É.vdf
+          file_size_bytes: 4096
+          sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          active_scene_changed: false
+        canonical_utf8_hex: 7b226163746976655f7363656e655f6368616e676564223a66616c73652c2266696c655f6e616d65223a22e9959ce5a4b45fc3892e766466222c2266696c655f73697a655f6279746573223a343039362c22726563656970745f76657273696f6e223a312c22736861323536223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161227d
+        sha256: ce41a69eec6594a5511ea7d219a26bb84af1d7db033876a1124a5b7cbbe12e58
 
 input_schema:
   $schema: https://json-schema.org/draft/2020-12/schema
@@ -212,6 +290,39 @@ output_schema:
         before_receipt: {type: "null"}
         after_receipt: {type: "null"}
       additionalProperties: false
+    confirmation_consume_rejected_context:
+      type: object
+      required:
+        - receipt_version
+        - request_id
+        - state
+        - effect
+        - replay_allowed
+        - host_connection_performed
+        - before_receipt_captured
+        - dispatch_performed
+        - confirmation_consumed
+        - consume_outcome
+        - before_receipt
+        - after_receipt
+      properties:
+        receipt_version: {type: string, const: "1.0"}
+        request_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        state: {type: string, const: confirmation_consume_rejected}
+        effect: {type: string, const: unknown}
+        replay_allowed: {type: boolean, const: false}
+        host_connection_performed: {type: boolean, const: true}
+        before_receipt_captured: {type: boolean, const: true}
+        dispatch_performed: {type: boolean, const: false}
+        confirmation_consumed: {type: boolean, const: false}
+        consume_outcome: {type: string, const: lost_atomic_compare_and_set}
+        before_receipt: {$ref: "#/$defs/scene_receipt"}
+        after_receipt: {type: "null"}
+      additionalProperties: false
     dispatched_context:
       type: object
       required:
@@ -320,6 +431,15 @@ output_schema:
     - type: object
       required: [success, message, prompt, error, context]
       properties:
+        success: {type: boolean, const: false}
+        message: {type: string}
+        prompt: {type: [string, "null"]}
+        error: {type: string, const: RestoreConfirmationConsumeRejected}
+        context: {$ref: "#/$defs/confirmation_consume_rejected_context"}
+      additionalProperties: false
+    - type: object
+      required: [success, message, prompt, error, context]
+      properties:
         success: {type: boolean, const: true}
         message: {type: string}
         prompt: {type: [string, "null"]}
@@ -375,6 +495,7 @@ result_validation_pipeline: [draft2020_schema, semantic_postconditions]
 
 semantic_postconditions:
   preflight_rejected: {}
+  confirmation_consume_rejected: {}
   succeeded:
     equal:
       - [/context/after_receipt/file_name, /context/approved_recovery_receipt/file_name]
