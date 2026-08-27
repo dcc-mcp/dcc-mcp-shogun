@@ -256,11 +256,15 @@ before/after terminal receipt or explicit unknown effect
   event ID and canonical digest are checked before one caller can claim SDK
   read-back ownership. The durable read-back claim owner is an adapter-secret
   HMAC over the job, event, operation, retained guard, durable claim generation,
-  claimed record revision, and next fence revision. That owner performs a fresh
-  official-SDK scene read-back plus guarded filesystem receipt capture and
-  revalidates every binding. Immediately before the terminal commit it must
-  immediately recapture the exact retained guard, then CAS the exact current
-  owner, claim generation, and fence revision. A stale, foreign or replaced
+  claimed record revision, next fence revision, and the durable exclusive
+  registry-process epoch lease. A successor epoch may be acquired only after
+  the durable lease implementation proves that the prior process owner is dead;
+  acquiring it atomically retires and fences every claim from that owner. That
+  owner performs a fresh official-SDK scene read-back plus guarded filesystem
+  receipt capture and revalidates every binding. Immediately before the
+  terminal commit it must immediately recapture the exact retained guard, then
+  CAS the exact current owner, claim generation, and fence revision. A stale,
+  foreign or replaced
   claim or guard fails closed without committing and without releasing another
   owner's guard. While the exact claim fence and guard ownership are still
   current, the adapter first atomically writes `cleanup_pending`, bound by
@@ -282,6 +286,15 @@ before/after terminal receipt or explicit unknown effect
   retries wakeup on restart. A crash after wakeup but before marker removal may
   notify again, providing at-least-once delivery without a second dispatch or
   read-back.
+  If a process dies after persisting `readback_in_progress` but before it writes
+  cleanup or terminal state, the successful exclusive-lease takeover detects
+  the retired claim epoch. The successor cannot reconstruct the lost
+  request-local read-back observation, so it performs no SDK read-back and
+  fails closed to `failed_unknown` with the truthful typed terminal source
+  `readback_owner_lost`. It persists the exact guard-bound cleanup
+  pending record, releases or quarantines only the retained guard identity, and
+  uses the same replayable terminal, tombstone, and waiter-notification
+  protocol. The old claim remains fenced and can never complete afterward.
   A cancellation arriving while that claim owns read-back is written as a
   durable, HMAC-bound claim-bound cancellation intent in a separate audit
   record. It does not advance the claimed job revision. The terminal CAS folds
@@ -297,7 +310,8 @@ before/after terminal receipt or explicit unknown effect
   one read-back claim and return the same tombstone; out-of-order or mismatched
   events fail without a state change. Cancellation racing completion is either
   recorded as requested-but-ineffective before the terminal CAS or ignored
-  after it. Exactly one read-back and terminal confirmation may occur.
+  after it. At most one read-back and terminal confirmation may occur; owner
+  loss before read-back instead produces the zero-read-back fail-closed branch.
 - A status result is publishable only if its generation, immutable binding,
   revision, event sequence, and state still equal the latest durable record.
   Thus an old pending descriptor cannot remain a valid emitted status after a

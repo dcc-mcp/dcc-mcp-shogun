@@ -6,9 +6,10 @@ import json
 import ntpath
 import secrets
 import unicodedata
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Barrier, Condition, Event, Lock, RLock
+from threading import Barrier, Condition, Event, Lock, RLock, Thread
 
 import pytest
 import yaml
@@ -741,7 +742,7 @@ def test_cancellation_cleanup_crash_reconciles_terminal_state_after_restart():
     assert guard.release_count == 1
     assert durable_store.waiter_notification_count == 0
 
-    restarted = FakeAsyncRestoreJobRegistry(durable_store)
+    restarted = FakeAsyncRestoreJobRegistry.restart_after_process_loss(durable_store)
     terminal = restarted.descriptor(job_id)
 
     assert terminal["status"] == "terminal_not_dispatched"
@@ -822,7 +823,7 @@ def test_crash_after_sdk_entry_remains_durable_dispatch_uncertain_and_cannot_ret
         workflow.start(request, "request_timeout")
 
     job_id = next(iter(durable_store.records))
-    restarted = FakeAsyncRestoreJobRegistry(durable_store)
+    restarted = FakeAsyncRestoreJobRegistry.restart_after_process_loss(durable_store)
     descriptor = restarted.descriptor(job_id)
     assert sdk.dispatch_count == 1
     assert descriptor["status"] == "dispatch_uncertain"
@@ -947,7 +948,7 @@ def test_late_pre_close_failure_terminalizes_tombstones_notifies_and_retains_own
     assert sdk.dispatch_count == sdk.readback_count == 1
     assert guard.release_count == 0
 
-    restarted = FakeAsyncRestoreJobRegistry(jobs.store)
+    restarted = FakeAsyncRestoreJobRegistry.restart_after_process_loss(jobs.store)
     assert restarted.descriptor(job_id) == terminal
     assert restarted.tombstone(job_id) == jobs.tombstone(job_id)
     assert restarted.cleanup_record(job_id) == jobs.cleanup_record(job_id)
@@ -1037,7 +1038,7 @@ def test_cleanup_resolution_crash_after_release_reconciles_on_registry_restart()
     assert durable_store.waiter_notification_count == 0
     assert sdk.dispatch_count == sdk.readback_count == 1
 
-    restarted = FakeAsyncRestoreJobRegistry(durable_store)
+    restarted = FakeAsyncRestoreJobRegistry.restart_after_process_loss(durable_store)
     terminal = restarted.descriptor(job_id)
 
     assert terminal["status"] == "terminal"
@@ -1068,7 +1069,7 @@ def test_tombstone_write_crash_replays_terminalization_and_notification_after_re
     assert durable_store.waiter_notification_count == 0
     assert sdk.dispatch_count == sdk.readback_count == 1
 
-    restarted = FakeAsyncRestoreJobRegistry(durable_store)
+    restarted = FakeAsyncRestoreJobRegistry.restart_after_process_loss(durable_store)
     terminal = restarted.descriptor(job_id)
 
     assert terminal["status"] == "terminal"
@@ -1091,7 +1092,7 @@ def test_waiter_notification_crash_replays_after_durable_tombstone_on_restart():
     assert durable_store.waiter_notification_count == 0
     assert sdk.dispatch_count == sdk.readback_count == 1
 
-    restarted = FakeAsyncRestoreJobRegistry(durable_store)
+    restarted = FakeAsyncRestoreJobRegistry.restart_after_process_loss(durable_store)
     terminal = restarted.descriptor(job_id)
 
     assert restarted.tombstone(job_id)["terminal_event_id"] == terminal["terminal_event_id"]
@@ -1115,7 +1116,7 @@ def test_notification_intent_crash_replays_wakeup_before_cleanup_commit_clears()
     assert durable_store.waiter_notification_count == 0
     assert sdk.dispatch_count == sdk.readback_count == 1
 
-    restarted = FakeAsyncRestoreJobRegistry(durable_store)
+    restarted = FakeAsyncRestoreJobRegistry.restart_after_process_loss(durable_store)
     terminal = restarted.descriptor(job_id)
 
     assert terminal["status"] == "terminal"
@@ -1279,16 +1280,28 @@ def test_fresh_registry_generation_cannot_reuse_a_previous_job_identity():
     for _ in range(2):
         store = FakeTrustedConfirmationStore()
         store.issue(request, authenticated=True)
+        registry = (
+            FakeAsyncRestoreJobRegistry(durable_store)
+            if not job_ids
+            else FakeAsyncRestoreJobRegistry.restart_after_process_loss(durable_store)
+        )
         workflow = FakeAsyncRestoreWorkflow(
             store,
             FakeOfficialSdkBoundary(),
             FakeGuardedTargetBoundary(),
-            FakeAsyncRestoreJobRegistry(durable_store),
+            registry,
         )
         result = workflow.start(request, "request_timeout")
         job_ids.append(result["context"]["job"]["job_id"])
 
     assert job_ids[0] != job_ids[1]
+
+
+def test_live_registry_process_epoch_lease_cannot_be_stolen():
+    jobs = FakeAsyncRestoreJobRegistry()
+
+    with pytest.raises(RuntimeError, match="registry process epoch lease is still owned"):
+        FakeAsyncRestoreJobRegistry(jobs.store)
 
 
 def test_late_completion_event_is_bound_to_exact_job_generation_and_operation():
@@ -1308,7 +1321,7 @@ def test_terminal_job_tombstone_survives_registry_restart_and_is_never_reused():
     workflow, jobs, _, job_id = _pending_async_workflow(durable_store)
     terminal = workflow.poll(job_id, late_success=True)["context"]["job"]
 
-    restarted = FakeAsyncRestoreJobRegistry(durable_store)
+    restarted = FakeAsyncRestoreJobRegistry.restart_after_process_loss(durable_store)
     assert restarted.descriptor(job_id) == terminal
     tombstone = restarted.tombstone(job_id)
     assert tombstone["job_id"] == job_id
@@ -1461,7 +1474,7 @@ def test_late_readback_recaptures_guard_immediately_before_terminal_cas_and_rele
         assert jobs._records[job_id]["status"] == "readback_in_progress"
 
 
-def test_exact_late_readback_claim_fence_survives_registry_restart():
+def test_old_late_readback_claim_is_epoch_fenced_after_registry_restart():
     _, jobs, sdk, job_id = _pending_async_workflow()
     event = jobs.make_completion_event(job_id, sdk.completion_receipt())
     claim = jobs.claim_late_readback(event)
@@ -1472,13 +1485,67 @@ def test_exact_late_readback_claim_fence_survives_registry_restart():
         assert record["readback_claim_generation"] == claim["claim_generation"]
         assert record["readback_claim_record_revision"] == claim["claimed_record_revision"]
         assert record["readback_claim_fence_revision"] == claim["fence_revision"]
+        assert record["readback_claim_registry_epoch"] == claim["registry_epoch"]
 
-    restarted = FakeAsyncRestoreJobRegistry(jobs.store)
-    outcome = restarted.complete_guarded_readback(claim, sdk.readback_after())
+    restarted = FakeAsyncRestoreJobRegistry.restart_after_process_loss(jobs.store)
+    with pytest.raises(RuntimeError, match="late completion fence rejected"):
+        restarted.complete_guarded_readback(claim, sdk.completion_receipt())
 
-    assert outcome == "succeeded"
-    assert restarted.descriptor(job_id)["status"] == "terminal"
+    terminal = restarted.descriptor(job_id)
+    assert terminal["status"] == "terminal"
+    assert restarted.audit_context(job_id)["terminal_outcome"] == "failed_unknown"
+    assert restarted.generation != claim["registry_epoch"]
+    assert sdk.readback_count == 0
     assert guard.release_count == 1
+
+
+def test_orphaned_readback_claim_without_request_local_object_fails_closed_on_restart():
+    workflow, jobs, sdk, job_id = _pending_async_workflow()
+    event = jobs.make_completion_event(job_id, sdk.completion_receipt())
+    jobs.claim_late_readback(event)
+    durable_store = jobs.store
+    guard = workflow.guard
+    del event, jobs, workflow
+
+    restarted = FakeAsyncRestoreJobRegistry(durable_store)
+    observed = {}
+    poller = Thread(
+        target=lambda: observed.setdefault("terminal", restarted.poll(job_id)),
+        daemon=True,
+    )
+    poller.start()
+    poller.join(timeout=0.25)
+
+    assert poller.is_alive() is False, "orphaned durable readback claim blocked status polling"
+    terminal = observed["terminal"]
+    assert terminal["status"] == "terminal"
+    assert terminal["snapshot_source"] == terminal["terminal_source"] == "readback_owner_lost"
+    assert restarted.audit_context(job_id)["terminal_outcome"] == "failed_unknown"
+    assert restarted.tombstone(job_id)["terminal_event_id"] == terminal["terminal_event_id"]
+    assert durable_store.waiter_notification_count == 1
+    assert sdk.dispatch_count == 1
+    assert sdk.readback_count == 0
+    assert guard.release_count == 1
+
+    contract = _contract()
+    Draft202012Validator(
+        {
+            "$defs": contract["private_audit_result_schema"]["$defs"],
+            "$ref": "#/$defs/terminal_unknown_job_descriptor",
+        }
+    ).validate(terminal)
+    public_terminal = _public_job_for_state(
+        "failed_unknown",
+        terminal,
+        "a" * 64,
+        b"adapter-private-test-key",
+    )
+    Draft202012Validator(
+        {
+            "$defs": contract["output_schema"]["$defs"],
+            "$ref": "#/$defs/public_terminal_unknown_job",
+        }
+    ).validate(public_terminal)
 
 
 def test_undispatched_terminal_record_rejects_every_late_transition_entrypoint():
@@ -1607,24 +1674,27 @@ def test_cancellation_during_active_readback_claim_preserves_fence_and_terminali
     assert sdk.dispatch_count == sdk.readback_count == 1
 
 
-def test_claim_bound_cancellation_intent_survives_registry_restart():
+def test_claim_bound_cancellation_intent_is_folded_during_orphan_recovery():
     _, jobs, sdk, job_id = _pending_async_workflow()
     event = jobs.make_completion_event(job_id, sdk.completion_receipt())
     claim = jobs.claim_late_readback(event)
     claimed_revision = claim["fence_revision"]
 
     cancellation = jobs.request_cancellation(job_id)
-    restarted = FakeAsyncRestoreJobRegistry(jobs.store)
-    outcome = restarted.complete_guarded_readback(claim, sdk.readback_after())
+    restarted = FakeAsyncRestoreJobRegistry.restart_after_process_loss(jobs.store)
+    with pytest.raises(RuntimeError, match="late completion fence rejected"):
+        restarted.complete_guarded_readback(claim, sdk.completion_receipt())
 
     assert cancellation["effective"] is False
-    assert outcome == "succeeded"
     terminal = restarted.descriptor(job_id)
-    assert terminal["record_revision"] == claimed_revision + 2
+    assert terminal["record_revision"] > claimed_revision
     assert terminal["cancellation_requested"] is True
     assert terminal["cancellation_effective"] is False
     assert terminal["cancellation_disposition"] == ("requested_after_dispatch_operation_continues")
-    assert sdk.dispatch_count == sdk.readback_count == 1
+    assert restarted.audit_context(job_id)["terminal_outcome"] == "failed_unknown"
+    assert restarted.tombstone(job_id)["terminal_event_id"] == terminal["terminal_event_id"]
+    assert sdk.dispatch_count == 1
+    assert sdk.readback_count == 0
 
 
 def _pending_async_workflow(durable_store=None, *, sdk=None):
@@ -2519,11 +2589,18 @@ class FakeRestoreWorkflow:
                 result["context"]["job"] = self.jobs.descriptor(job_id)
 
 
+class FakeRegistryProcessEpochLease:
+    pass
+
+
 class FakeDurableJobStore:
     def __init__(self):
         self.condition = Condition(RLock())
         self._next_generation = 1
         self._next_claim_generation = 1
+        self.active_registry_epoch = None
+        self.retired_registry_epochs = set()
+        self._active_registry_epoch_lease = None
         self.claim_owner_secret = secrets.token_bytes(32)
         self.records = {}
         self.tombstones = {}
@@ -2538,9 +2615,25 @@ class FakeDurableJobStore:
 
     def start_generation(self):
         with self.condition:
+            active_lease = (
+                self._active_registry_epoch_lease()
+                if self._active_registry_epoch_lease is not None
+                else None
+            )
+            if active_lease is not None:
+                raise RuntimeError("registry process epoch lease is still owned")
             generation = f"{self._next_generation:016x}"
             self._next_generation += 1
-            return generation
+            if self.active_registry_epoch is not None:
+                self.retired_registry_epochs.add(self.active_registry_epoch)
+            self.active_registry_epoch = generation
+            lease = FakeRegistryProcessEpochLease()
+            self._active_registry_epoch_lease = weakref.ref(lease)
+            return generation, lease
+
+    def mark_registry_process_lost_for_restart(self):
+        with self.condition:
+            self._active_registry_epoch_lease = None
 
     def reserve_claim_generation(self):
         with self.condition:
@@ -2579,6 +2672,7 @@ class FakeAsyncRestoreJobRegistry:
         "readback_claim_generation",
         "readback_claim_record_revision",
         "readback_claim_fence_revision",
+        "readback_claim_registry_epoch",
         "cleanup_pending",
         "cleanup_terminal_plan",
         "cleanup_commit_pending",
@@ -2587,11 +2681,17 @@ class FakeAsyncRestoreJobRegistry:
 
     def __init__(self, durable_store=None):
         self.store = durable_store or FakeDurableJobStore()
-        self.generation = self.store.start_generation()
+        self.generation, self._process_epoch_lease = self.store.start_generation()
         self._records = self.store.records
         self._next_id = 1
         self.poll_count = 0
         self._reconcile_pending_cleanups()
+        self._reconcile_orphaned_readbacks()
+
+    @classmethod
+    def restart_after_process_loss(cls, durable_store):
+        durable_store.mark_registry_process_lost_for_restart()
+        return cls(durable_store)
 
     def create_before_host_connection(self, request, ticket, resolver):
         root = resolver.resolve(request["trusted_root"])
@@ -2657,6 +2757,7 @@ class FakeAsyncRestoreJobRegistry:
                 "readback_claim_generation": None,
                 "readback_claim_record_revision": None,
                 "readback_claim_fence_revision": None,
+                "readback_claim_registry_epoch": None,
                 "completion_event": None,
                 "cleanup_pending": None,
                 "cleanup_terminal_plan": None,
@@ -2848,6 +2949,76 @@ class FakeAsyncRestoreJobRegistry:
                     "cleanup_commit_pending"
                 ):
                     self._reconcile_cleanup_record(record)
+
+    def _reconcile_orphaned_readbacks(self):
+        with self.store.condition:
+            for record in self._records.values():
+                claim_epoch = record.get("readback_claim_registry_epoch")
+                if (
+                    record.get("status") != "readback_in_progress"
+                    or claim_epoch not in self.store.retired_registry_epochs
+                ):
+                    continue
+                event = record.get("completion_event")
+                guard = record.get("guard")
+                guard_token = record.get("guard_token")
+                if event is None or guard is None or guard_token is None:
+                    raise RuntimeError("orphaned readback binding rejected")
+                if (
+                    guard_token.get("guard_owner") != record["retained_guard_owner"]
+                    or guard_token.get("guard_generation") != record["retained_guard_generation"]
+                ):
+                    raise RuntimeError("orphaned readback binding rejected")
+                cancellation_intent = self.store.cancellation_intents.get(record["job_id"])
+                if cancellation_intent is not None and cancellation_intent != (
+                    self._cancellation_intent_for_active_claim(record)
+                ):
+                    raise RuntimeError("cancellation intent binding rejected")
+                cleanup_binding = {
+                    "job_id": record["job_id"],
+                    "job_generation": record["job_generation"],
+                    "operation_binding_sha256": record["operation_binding_sha256"],
+                    "terminal_event_id": event["event_id"],
+                    "guard_owner": guard_token["guard_owner"],
+                    "guard_generation": guard_token["guard_generation"],
+                }
+                cleanup_pending = self.store.cleanup_store.prepare(
+                    binding=cleanup_binding,
+                    phase="orphaned_readback_claim",
+                )
+                self._advance(
+                    record,
+                    advance_event=False,
+                    status="cleanup_pending",
+                    cleanup_pending=cleanup_pending,
+                    cleanup_terminal_plan={
+                        "outcome": "failed_unknown",
+                        "status": "terminal",
+                        "snapshot_source": "readback_owner_lost",
+                        "terminal_source": "readback_owner_lost",
+                        "released_handle_owner": "released_after_terminal_unknown",
+                        "late_completion_disposition": "not_applicable",
+                        "dispatch_count": 1,
+                        "terminal_event_id": event["event_id"],
+                        "terminal_event_digest_sha256": event["event_digest_sha256"],
+                        "cancellation_requested": cancellation_intent is not None,
+                        "cancellation_effective": False,
+                        "cancellation_disposition": (
+                            "requested_after_dispatch_operation_continues"
+                            if cancellation_intent is not None
+                            else record["cancellation_disposition"]
+                        ),
+                    },
+                )
+                cleanup_record = _release_guard_preserving_primary(
+                    self.store.cleanup_store,
+                    binding=cleanup_binding,
+                    phase="orphaned_readback_claim",
+                    guard=guard,
+                    guard_token=guard_token,
+                    prepared=cleanup_pending,
+                )
+                self._finalize_cleanup(record, cleanup_record)
 
     def retain_handles(self, job_id, guard, guard_token):
         with self.store.condition:
@@ -3094,6 +3265,7 @@ class FakeAsyncRestoreJobRegistry:
             "claim_owner": record["readback_claim_owner"],
             "claim_generation": record["readback_claim_generation"],
             "fence_revision": record["readback_claim_fence_revision"],
+            "registry_epoch": record["readback_claim_registry_epoch"],
         }
         canonical = json.dumps(binding, separators=(",", ":"), sort_keys=True).encode()
         intent_id = (
@@ -3126,7 +3298,14 @@ class FakeAsyncRestoreJobRegistry:
                 )
             return dict(record["completion_event"])
 
-    def _claim_owner_for(self, record, event, claim_generation, claimed_revision):
+    def _claim_owner_for(
+        self,
+        record,
+        event,
+        claim_generation,
+        claimed_revision,
+        registry_epoch,
+    ):
         binding = {
             "job_id": record["job_id"],
             "job_generation": record["job_generation"],
@@ -3134,6 +3313,7 @@ class FakeAsyncRestoreJobRegistry:
             "event_id": event["event_id"],
             "claim_generation": claim_generation,
             "claimed_record_revision": claimed_revision,
+            "registry_epoch": registry_epoch,
             "retained_guard_owner": record["retained_guard_owner"],
             "retained_guard_generation": record["retained_guard_generation"],
         }
@@ -3181,6 +3361,7 @@ class FakeAsyncRestoreJobRegistry:
                 event,
                 claim_generation,
                 claimed_revision,
+                self.generation,
             )
             fence_revision = claimed_revision + 1
             record["completion_event"] = dict(event)
@@ -3192,6 +3373,7 @@ class FakeAsyncRestoreJobRegistry:
                 readback_claim_generation=claim_generation,
                 readback_claim_record_revision=claimed_revision,
                 readback_claim_fence_revision=fence_revision,
+                readback_claim_registry_epoch=self.generation,
             )
             assert record["record_revision"] == fence_revision
             return {
@@ -3204,6 +3386,7 @@ class FakeAsyncRestoreJobRegistry:
                 "claim_generation": claim_generation,
                 "claimed_record_revision": claimed_revision,
                 "fence_revision": fence_revision,
+                "registry_epoch": self.generation,
                 "retained_guard_owner": record["retained_guard_owner"],
                 "retained_guard_generation": record["retained_guard_generation"],
             }
@@ -3226,6 +3409,7 @@ class FakeAsyncRestoreJobRegistry:
             event,
             claim.get("claim_generation"),
             claim.get("claimed_record_revision"),
+            claim.get("registry_epoch"),
         )
         return (
             claim.get("claim_version") == "1.0"
@@ -3239,6 +3423,8 @@ class FakeAsyncRestoreJobRegistry:
             and record["readback_claim_generation"] == claim.get("claim_generation")
             and record["readback_claim_record_revision"] == claim.get("claimed_record_revision")
             and record["readback_claim_fence_revision"] == claim.get("fence_revision")
+            and record["readback_claim_registry_epoch"] == claim.get("registry_epoch")
+            and claim.get("registry_epoch") == self.generation
             and claim.get("fence_revision") == claim.get("claimed_record_revision") + 1
             and record["retained_guard_owner"] == claim.get("retained_guard_owner")
             and record["retained_guard_generation"] == claim.get("retained_guard_generation")
@@ -4170,7 +4356,7 @@ def test_synchronous_cleanup_uses_the_same_durable_job_registry():
         durable_store.tombstones[job_id]["cleanup_binding_sha256"]
         == (workflow.jobs.cleanup_record(job_id)["cleanup_binding_sha256"])
     )
-    restarted = FakeAsyncRestoreJobRegistry(durable_store)
+    restarted = FakeAsyncRestoreJobRegistry.restart_after_process_loss(durable_store)
     assert restarted.descriptor(job_id) == result["context"]["job"]
     assert restarted.tombstone(job_id) == workflow.jobs.tombstone(job_id)
 
@@ -4200,7 +4386,7 @@ def test_synchronous_cleanup_crash_reconciles_from_the_durable_registry():
     assert guard.release_count == 1
     assert durable_store.waiter_notification_count == 0
 
-    restarted = FakeAsyncRestoreJobRegistry(durable_store)
+    restarted = FakeAsyncRestoreJobRegistry.restart_after_process_loss(durable_store)
     terminal = restarted.descriptor(job_id)
 
     assert terminal["status"] == "terminal"
@@ -4981,6 +5167,15 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
             "persistence": "durable_atomic_job_record",
             "owner": "adapter_secret_hmac_sha256_v1",
             "generation": "durable_monotonic_claim_generation",
+            "registry_process_epoch": "durable_exclusive_epoch_lease",
+            "epoch_acquisition": "only_after_previous_owner_death_is_proven",
+            "live_epoch_takeover": "rejected",
+            "orphan_detection": "claimed_epoch_retired_by_exclusive_lease_takeover",
+            "orphan_recovery": (
+                "terminal_failed_unknown_without_sdk_readback_then_durable_cleanup"
+            ),
+            "orphan_terminal_source": "readback_owner_lost",
+            "old_claim_after_takeover": "fenced_and_rejected",
             "claimed_revision": "completion_event_expected_revision",
             "fence_revision": "claimed_record_revision_plus_one",
             "bindings": [
@@ -4989,6 +5184,7 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
                 "operation_binding_sha256",
                 "completion_event_id",
                 "retained_guard_owner_and_generation",
+                "registry_process_epoch",
             ],
             "completion_cas": "exact_latest_owner_generation_and_fence_revision",
             "guard_recapture": "immediately_before_terminal_cas",
@@ -5011,6 +5207,7 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
                 "claim_generation",
                 "claimed_record_revision",
                 "fence_revision",
+                "registry_epoch",
                 "retained_guard_owner",
                 "retained_guard_generation",
             ],
@@ -5033,6 +5230,10 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
                 },
                 "claimed_record_revision": {"type": "integer", "minimum": 1},
                 "fence_revision": {"type": "integer", "minimum": 2},
+                "registry_epoch": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{16}$",
+                },
                 "retained_guard_owner": {
                     "type": "string",
                     "pattern": "^rgo1-[0-9a-f]{64}$",
@@ -5051,11 +5252,12 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
         "record_revision": "strictly_monotonic_every_record_write",
         "event_sequence": "strictly_monotonic_exact_event_order",
         "terminal_immutability": "no_writes_after_terminal",
-        "readback_claim": "durable_hmac_owner_generation_and_revision_fence",
+        "readback_claim": "durable_hmac_owner_generation_revision_and_process_epoch_fence",
+        "orphaned_readback_claim": ("failed_unknown_without_sdk_readback_then_durable_cleanup"),
         "completion_commit": ("immediate_guard_recapture_then_cleanup_pending_then_terminal_cas"),
         "handle_release": "only_after_durable_exact_guard_bound_cleanup_pending",
         "cancellation_during_readback_claim": ("fold_exact_durable_side_intent_into_terminal_cas"),
-        "readback": "exactly_once_per_job",
+        "readback": "at_most_once_per_job",
         "duplicate_completion": "return_existing_terminal_without_readback",
         "out_of_order_completion": "reject_without_state_change",
         "stale_snapshot_publication": "reject_against_latest_durable_revision",
@@ -5074,6 +5276,7 @@ def test_late_readback_claim_has_a_strict_private_schema_and_revision_fence():
     for invalid in (
         dict(claim, claim_owner="foreign-owner"),
         dict(claim, claim_generation="1"),
+        dict(claim, registry_epoch="1"),
         dict(claim, retained_guard_owner="operator-name"),
     ):
         with pytest.raises(ValidationError):
@@ -5217,7 +5420,10 @@ def test_adr_preserves_the_design_only_acceptance_boundary():
         "record_revision",
         "event_sequence",
         "Terminal records are immutable",
-        "Exactly one read-back",
+        "At most one read-back",
+        "registry-process epoch lease",
+        "retired claim epoch",
+        "zero-read-back fail-closed branch",
         "old pending descriptor",
         "consume_count == dispatch_count == 1",
         "GetSceneName",

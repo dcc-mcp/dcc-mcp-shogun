@@ -223,6 +223,13 @@ async_job_contract:
       persistence: durable_atomic_job_record
       owner: adapter_secret_hmac_sha256_v1
       generation: durable_monotonic_claim_generation
+      registry_process_epoch: durable_exclusive_epoch_lease
+      epoch_acquisition: only_after_previous_owner_death_is_proven
+      live_epoch_takeover: rejected
+      orphan_detection: claimed_epoch_retired_by_exclusive_lease_takeover
+      orphan_recovery: terminal_failed_unknown_without_sdk_readback_then_durable_cleanup
+      orphan_terminal_source: readback_owner_lost
+      old_claim_after_takeover: fenced_and_rejected
       claimed_revision: completion_event_expected_revision
       fence_revision: claimed_record_revision_plus_one
       bindings:
@@ -231,6 +238,7 @@ async_job_contract:
         - operation_binding_sha256
         - completion_event_id
         - retained_guard_owner_and_generation
+        - registry_process_epoch
       completion_cas: exact_latest_owner_generation_and_fence_revision
       guard_recapture: immediately_before_terminal_cas
       guard_release: exact_claimed_guard_only_after_durable_cleanup_pending
@@ -249,6 +257,7 @@ async_job_contract:
         - claim_generation
         - claimed_record_revision
         - fence_revision
+        - registry_epoch
         - retained_guard_owner
         - retained_guard_generation
       properties:
@@ -261,6 +270,7 @@ async_job_contract:
         claim_generation: {type: string, pattern: "^[0-9a-f]{16}$"}
         claimed_record_revision: {type: integer, minimum: 1}
         fence_revision: {type: integer, minimum: 2}
+        registry_epoch: {type: string, pattern: "^[0-9a-f]{16}$"}
         retained_guard_owner: {type: string, pattern: "^rgo1-[0-9a-f]{64}$"}
         retained_guard_generation: {type: string, pattern: "^[0-9a-f]{16}$"}
       additionalProperties: false
@@ -270,11 +280,12 @@ async_job_contract:
     record_revision: strictly_monotonic_every_record_write
     event_sequence: strictly_monotonic_exact_event_order
     terminal_immutability: no_writes_after_terminal
-    readback_claim: durable_hmac_owner_generation_and_revision_fence
+    readback_claim: durable_hmac_owner_generation_revision_and_process_epoch_fence
+    orphaned_readback_claim: failed_unknown_without_sdk_readback_then_durable_cleanup
     completion_commit: immediate_guard_recapture_then_cleanup_pending_then_terminal_cas
     handle_release: only_after_durable_exact_guard_bound_cleanup_pending
     cancellation_during_readback_claim: fold_exact_durable_side_intent_into_terminal_cas
-    readback: exactly_once_per_job
+    readback: at_most_once_per_job
     duplicate_completion: return_existing_terminal_without_readback
     out_of_order_completion: reject_without_state_change
     stale_snapshot_publication: reject_against_latest_durable_revision
@@ -789,6 +800,7 @@ private_audit_result_schema:
             - target_guard
             - official_sdk_readback
             - official_sdk_failure
+            - readback_owner_lost
             - request_timeout
             - transport_loss
             - cancellation_before_dispatch
@@ -803,6 +815,7 @@ private_audit_result_schema:
             - target_guard
             - official_sdk_readback
             - official_sdk_failure
+            - readback_owner_lost
             - cancellation_before_dispatch
             - null
         cancellation_disposition:
@@ -1046,8 +1059,10 @@ private_audit_result_schema:
         - type: object
           properties:
             status: {type: string, const: terminal}
-            snapshot_source: {type: string, const: official_sdk_failure}
-            terminal_source: {type: string, const: official_sdk_failure}
+            snapshot_source:
+              {type: string, enum: [official_sdk_failure, readback_owner_lost]}
+            terminal_source:
+              {type: string, enum: [official_sdk_failure, readback_owner_lost]}
             cancellation_disposition:
               type: string
               enum: [not_requested, requested_after_dispatch_operation_continues]
@@ -1450,6 +1465,7 @@ output_schema:
             - target_guard
             - official_sdk_readback
             - official_sdk_failure
+            - readback_owner_lost
             - request_timeout
             - transport_loss
             - cancellation_before_dispatch
@@ -1464,6 +1480,7 @@ output_schema:
             - target_guard
             - official_sdk_readback
             - official_sdk_failure
+            - readback_owner_lost
             - cancellation_before_dispatch
             - null
         cancellation_disposition:
@@ -1694,8 +1711,10 @@ output_schema:
         - type: object
           properties:
             status: {type: string, const: terminal}
-            snapshot_source: {type: string, const: official_sdk_failure}
-            terminal_source: {type: string, const: official_sdk_failure}
+            snapshot_source:
+              {type: string, enum: [official_sdk_failure, readback_owner_lost]}
+            terminal_source:
+              {type: string, enum: [official_sdk_failure, readback_owner_lost]}
             cancellation_requested: {type: boolean}
             cancellation_effective: {type: boolean, const: false}
             handle_retention_owner:
