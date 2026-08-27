@@ -31,7 +31,7 @@ def test_target_swap_is_blocked_across_actual_sdk_path_open(tmp_path):
     with RetainedWindowsPath(trusted_root, target) as retained:
         with pytest.raises(OSError):
             os.replace(replacement, target)
-        loaded = WindowsSdkPathAdapter().open_scene(retained.dispatch_path)
+        loaded = WindowsSdkPathAdapter().open_scene(retained)
 
         assert retained.all_handles_retained
         assert retained.dispatch_path.startswith("\\\\?\\Volume{")
@@ -43,7 +43,7 @@ def test_target_swap_is_blocked_across_actual_sdk_path_open(tmp_path):
         )
 
     os.replace(replacement, target)
-    replaced = WindowsSdkPathAdapter().open_scene(retained.dispatch_path)
+    replaced = WindowsSdkPathAdapter().open_path_for_control(retained.dispatch_path)
     assert replaced.identity != retained.confirmed.identity
     assert replaced.sha256 != retained.confirmed.sha256
 
@@ -53,20 +53,20 @@ def test_same_content_object_swap_is_blocked_across_actual_sdk_path_open(tmp_pat
         tmp_path,
         replacement_bytes=b"confirmed-scene",
     )
-    replacement_before = WindowsSdkPathAdapter().open_scene(str(replacement))
+    replacement_before = WindowsSdkPathAdapter().open_path_for_control(str(replacement))
 
     with RetainedWindowsPath(trusted_root, target) as retained:
         assert replacement_before.sha256 == retained.confirmed.sha256
         assert replacement_before.identity != retained.confirmed.identity
         with pytest.raises(OSError):
             os.replace(replacement, target)
-        loaded = WindowsSdkPathAdapter().open_scene(retained.dispatch_path)
+        loaded = WindowsSdkPathAdapter().open_scene(retained)
 
         assert loaded.identity == retained.confirmed.identity
         assert loaded.sha256 == hashlib.sha256(confirmed_bytes).hexdigest()
 
     os.replace(replacement, target)
-    replaced = WindowsSdkPathAdapter().open_scene(retained.dispatch_path)
+    replaced = WindowsSdkPathAdapter().open_path_for_control(retained.dispatch_path)
     assert replaced.sha256 == retained.confirmed.sha256
     assert replaced.identity != retained.confirmed.identity
 
@@ -80,7 +80,7 @@ def test_ancestor_swap_is_blocked_across_actual_sdk_path_open(tmp_path, attack_c
     with RetainedWindowsPath(trusted_root, target) as retained:
         with pytest.raises(OSError):
             os.rename(attacked, parked)
-        loaded = WindowsSdkPathAdapter().open_scene(retained.dispatch_path)
+        loaded = WindowsSdkPathAdapter().open_scene(retained)
 
         assert loaded.identity == retained.confirmed.identity
         assert loaded.sha256 == retained.confirmed.sha256
@@ -106,14 +106,14 @@ def test_junction_swap_is_blocked_across_actual_sdk_path_open(tmp_path):
                 os.replace(junction_candidate, scene_directory)
             with pytest.raises(OSError):
                 os.rename(scene_directory, parked)
-            loaded = WindowsSdkPathAdapter().open_scene(retained.dispatch_path)
+            loaded = WindowsSdkPathAdapter().open_scene(retained)
 
             assert loaded.identity == retained.confirmed.identity
             assert loaded.sha256 == retained.confirmed.sha256
 
         os.rename(scene_directory, parked)
         os.rename(junction_candidate, scene_directory)
-        replaced = WindowsSdkPathAdapter().open_scene(retained.dispatch_path)
+        replaced = WindowsSdkPathAdapter().open_path_for_control(retained.dispatch_path)
         assert replaced.identity != retained.confirmed.identity
         assert replaced.sha256 != retained.confirmed.sha256
         os.rename(scene_directory, junction_candidate)
@@ -121,3 +121,80 @@ def test_junction_swap_is_blocked_across_actual_sdk_path_open(tmp_path):
     finally:
         if junction_candidate.exists():
             os.rmdir(junction_candidate)
+
+
+def test_preexisting_target_symlink_to_outside_trusted_root_is_rejected(tmp_path):
+    trusted_root = tmp_path / "trusted"
+    scene_directory = trusted_root / "scene"
+    scene_directory.mkdir(parents=True)
+    outside = tmp_path / "outside.vdf"
+    outside.write_bytes(b"outside-scene")
+    target_alias = scene_directory / "marked_take.vdf"
+    target_alias.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="reparse"):
+        with RetainedWindowsPath(trusted_root, target_alias):
+            pass
+
+
+def test_alternate_data_stream_target_is_rejected(tmp_path):
+    trusted_root = tmp_path / "trusted"
+    scene_directory = trusted_root / "scene"
+    scene_directory.mkdir(parents=True)
+    primary = scene_directory / "primary.vdf"
+    primary.write_bytes(b"primary-scene")
+    alternate_stream = primary.with_name(f"{primary.name}:marked_take.vdf")
+    alternate_stream.write_bytes(b"hidden-scene")
+
+    with pytest.raises(ValueError, match="alternate data stream"):
+        with RetainedWindowsPath(trusted_root, alternate_stream):
+            pass
+
+
+def test_cross_root_hardlink_alias_is_rejected(tmp_path):
+    trusted_root = tmp_path / "trusted"
+    scene_directory = trusted_root / "scene"
+    scene_directory.mkdir(parents=True)
+    outside = tmp_path / "outside.vdf"
+    outside.write_bytes(b"outside-scene")
+    target_alias = scene_directory / "marked_take.vdf"
+    os.link(outside, target_alias)
+
+    with pytest.raises(ValueError, match="hardlink"):
+        with RetainedWindowsPath(trusted_root, target_alias):
+            pass
+
+
+def test_preexisting_junction_to_outside_trusted_root_is_rejected(tmp_path):
+    trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir()
+    outside_directory = tmp_path / "outside"
+    outside_directory.mkdir()
+    (outside_directory / "marked_take.vdf").write_bytes(b"outside-scene")
+    junction = trusted_root / "linked-scene"
+    create_junction(junction, outside_directory)
+
+    try:
+        with pytest.raises(ValueError, match="reparse"):
+            with RetainedWindowsPath(trusted_root, junction / "marked_take.vdf"):
+                pass
+    finally:
+        if junction.exists():
+            os.rmdir(junction)
+
+
+def test_sdk_adapter_recaptures_handle_derived_component_chain_around_path_use(tmp_path):
+    _, trusted_root, _, target, _, _ = _scene_layout(tmp_path)
+    adapter = WindowsSdkPathAdapter()
+
+    with RetainedWindowsPath(trusted_root, target) as retained:
+        baseline = retained.component_evidence
+        loaded = adapter.open_scene(retained)
+
+        assert len(baseline) >= 4
+        assert all(item.final_path.startswith("\\\\?\\Volume{") for item in baseline)
+        assert all(item.reparse_tag == 0 for item in baseline)
+        assert retained.recapture_count == 2
+        assert loaded == retained.confirmed
+        with pytest.raises(TypeError, match="RetainedWindowsPath"):
+            adapter.open_scene(retained.dispatch_path)

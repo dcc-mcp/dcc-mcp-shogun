@@ -61,6 +61,14 @@ before/after terminal receipt or explicit unknown effect
   128-bit file ID, and reject a symlink, junction, mount-point, device-identity
   change, or reparse escape. The resolved target must be a regular file inside
   the resolved approved root on the same volume.
+- Reject alternate-data-stream syntax both before opening and in every
+  handle-derived final path. Reject a pre-existing file symlink or directory
+  junction even when its current target happens to resolve inside the trusted
+  root. Because an NTFS hardlink can give the same immutable file identity an
+  unapproved name outside the trusted root, this design accepts only a target
+  whose handle reports exactly one hardlink. That deliberately strict rule
+  makes cross-root hardlink aliases fail closed rather than leaving their
+  authority undefined.
 - The normative path binding is `windows-final-path-v1`, followed by LF-delimited
   `volume_serial`, `file_id`, and `path` fields. Strip only the native extended
   path prefix, normalize separators and Unicode NFC, and apply Windows
@@ -87,6 +95,13 @@ before/after terminal receipt or explicit unknown effect
   read-back (or an unknown-effect terminal result). A drive-letter path, caller
   spelling, or path reconstructed after releasing an ancestor is not dispatch
   authority.
+- Bind the volume root, trusted root, every intermediate directory, and target
+  to a captured tuple of handle-derived volume-GUID final path, volume serial,
+  128-bit file ID, file attributes, and reparse tag. Recapture that complete
+  tuple and the target bytes immediately before and after every SDK path-adapter
+  open. The adapter accepts the retained chain capability, not a bare path; its
+  independently reopened object must equal the confirmed target identity and
+  digest before any read-back can be trusted.
 - Revalidate all pinned directory and target identities after the official SDK
   before receipt is captured, after recapturing target bytes and digest, and
   immediately before confirmation CAS. Dispatch entry is the final
@@ -101,8 +116,9 @@ before/after terminal receipt or explicit unknown effect
   path adapter reopens the volume-GUID path. It compares the independently
   opened volume serial and 128-bit file ID with the confirmed target, and reads
   the bytes through that new handle. Target, parent, namespace, real NTFS
-  junction, and same-content replacement attacks must fail while retained and
-  the adapter must load the confirmed identity. Control operations repeat
+  junction, pre-existing symlink/junction, alternate-data-stream, hardlink, and
+  same-content replacement attacks must fail while retained and the adapter
+  must load the confirmed identity. Control operations repeat
   after the retained handles are released; they must then succeed and make the same
   path resolve to a different file identity. This harness never invokes Shogun
   and therefore proves Windows path mechanics, not official SDK compatibility.
@@ -164,12 +180,23 @@ before/after terminal receipt or explicit unknown effect
 
 ### Asynchronous job ownership
 
-- Create an immutable record in the trusted adapter-local restore job registry
-  before host connection or dispatch. Its operation-binding digest covers the
-  request ID, confirmation ID and revision, trusted-root and target identity,
-  and recovery-receipt digest. Public results expose only the bounded job ID,
-  request ID, operation name, binding digest, lifecycle enums, and counters;
-  confirmation material and paths stay inside the trusted registry.
+- Create an immutable identity and revisioned record in a durable, atomic,
+  trusted adapter-local restore job registry before host connection or
+  dispatch. A fresh registry process obtains a durable monotonic generation;
+  job identity is derived from that generation, an atomically reserved
+  sequence, and the immutable operation-binding digest. Reservation immediately
+  creates a permanent tombstone, so restart, pruning, or terminal completion
+  can never make a prior job ID reusable. Its operation-binding digest covers
+  the request ID, confirmation ID and revision, trusted-root and target
+  identity, and recovery-receipt digest.
+- Raw job generation, caller request ID, operation binding, completion-event
+  identity, scene/take/operator names, paths, and before/after/approved receipts
+  remain only in the private audit record. The public result is a complete
+  adapter-secret HMAC projection: it exposes a separately domain-separated
+  public job handle, request correlation, generation, operation-binding,
+  terminal-event, and receipt/observation projections plus bounded lifecycle
+  enums and counters. It never copies a private audit object into a public
+  context.
 - `jobs_get_status` accepts only one exact `job_id`. It performs a trusted
   registry lookup and never dispatches, retries, or reconstructs the restore
   request. Every result binds `context.request_id` to the job's request ID, and
@@ -179,12 +206,32 @@ before/after terminal receipt or explicit unknown effect
   handles. For cancellation after dispatch, do not abort, retry, or claim a
   terminal effect: the operation continues under the same job, polling remains
   available, and the registry retains the full pinned handle chain.
+- Persist `cancellation_requested`, `cancellation_effective`, and a typed
+  disposition separately. A pre-dispatch request is effective; a post-dispatch
+  request is recorded but cannot abort or duplicate the operation. A request
+  after any terminal state returns `ignored_after_terminal` without writing the
+  terminal record.
 - Timeout and transport loss after dispatch have the same non-replay boundary.
   They report a null terminal source and transfer handle-retention ownership to
   the registry. A late official SDK read-back may terminalize only that exact
   job and operation binding; only then may it report success and release the
-  retained handles. Repeated polling of either pending or terminal state cannot
-  increment the dispatch count.
+  retained handles. The terminal signal is a typed completion event bound to
+  the exact job ID, durable generation, immutable operation binding, expected
+  record revision, next event sequence, terminal source, and completion-receipt
+  digest. Its exact event ID and canonical digest are checked before one caller
+  can claim SDK read-back ownership. Repeated polling of either pending or
+  terminal state cannot increment the dispatch count.
+- Every durable record write uses the registry CAS lock, increments a strictly
+  monotonic `record_revision`, and consumes only the next `event_sequence`.
+  Terminal records are immutable. Concurrent duplicate completion events share
+  one read-back claim and return the same tombstone; out-of-order or mismatched
+  events fail without a state change. Cancellation racing completion is either
+  recorded as requested-but-ineffective before the terminal CAS or ignored
+  after it. Exactly one read-back and terminal confirmation may occur.
+- A status result is publishable only if its generation, immutable binding,
+  revision, event sequence, and state still equal the latest durable record.
+  Thus an old pending descriptor cannot remain a valid emitted status after a
+  newer terminal revision, even though its standalone JSON shape is valid.
 
 ### Terminal state and receipts
 
@@ -234,9 +281,11 @@ before/after terminal receipt or explicit unknown effect
   replay the mutation or reuse the confirmation.
 - Results must retain the repository's bounded success/failure envelope and
   use fixed state-specific public messages with `prompt=null`. Full paths, raw
-  exception messages, SDK result text, and operator confirmation secrets are
-  forbidden in every branch; detailed diagnostics belong only in an
-  operator-owned internal sink. Validation applies the Draft 2020-12 schema,
+  exception messages, SDK result text, operator confirmation secrets, raw
+  caller IDs, scene/take/operator names, receipt objects, and terminal event
+  identifiers are forbidden in every public branch; detailed diagnostics and
+  raw audit evidence belong only in the trusted registry. Validation applies
+  the Draft 2020-12 schema,
   global JSON-pointer semantic invariants, state `semantic_postconditions`, and
   scene-identity digest checks. Structural schema validation alone is
   insufficient because standard JSON Schema cannot compare dynamic values.

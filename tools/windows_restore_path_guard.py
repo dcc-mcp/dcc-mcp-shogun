@@ -20,6 +20,8 @@ FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 FILE_BEGIN = 0
 FILE_ID_INFO_CLASS = 18
+FILE_ATTRIBUTE_TAG_INFO_CLASS = 9
+FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 VOLUME_NAME_GUID = 0x00000001
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
@@ -52,6 +54,11 @@ if os.name == "nt":
         wintypes.DWORD,
     )
     _kernel32.GetFileInformationByHandleEx.restype = wintypes.BOOL
+    _kernel32.GetFileInformationByHandle.argtypes = (
+        wintypes.HANDLE,
+        wintypes.LPVOID,
+    )
+    _kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
     _kernel32.SetFilePointerEx.argtypes = (
         wintypes.HANDLE,
         ctypes.c_longlong,
@@ -82,6 +89,28 @@ class _FileIdInfo(ctypes.Structure):
     ]
 
 
+class _FileAttributeTagInfo(ctypes.Structure):
+    _fields_ = [
+        ("file_attributes", wintypes.DWORD),
+        ("reparse_tag", wintypes.DWORD),
+    ]
+
+
+class _ByHandleFileInformation(ctypes.Structure):
+    _fields_ = [
+        ("file_attributes", wintypes.DWORD),
+        ("creation_time", wintypes.FILETIME),
+        ("last_access_time", wintypes.FILETIME),
+        ("last_write_time", wintypes.FILETIME),
+        ("volume_serial_number", wintypes.DWORD),
+        ("file_size_high", wintypes.DWORD),
+        ("file_size_low", wintypes.DWORD),
+        ("number_of_links", wintypes.DWORD),
+        ("file_index_high", wintypes.DWORD),
+        ("file_index_low", wintypes.DWORD),
+    ]
+
+
 @dataclass(frozen=True)
 class WindowsFileIdentity:
     volume_serial_number: int
@@ -92,6 +121,14 @@ class WindowsFileIdentity:
 class OpenedScene:
     identity: WindowsFileIdentity
     sha256: str
+
+
+@dataclass(frozen=True)
+class WindowsPathComponentEvidence:
+    final_path: str
+    identity: WindowsFileIdentity
+    file_attributes: int
+    reparse_tag: int
 
 
 def _require_windows():
@@ -107,7 +144,9 @@ def _win_error(message):
 def _open_handle(path, *, directory):
     _require_windows()
     desired_access = FILE_READ_ATTRIBUTES if directory else GENERIC_READ | FILE_READ_ATTRIBUTES
-    flags = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT if directory else 0
+    flags = FILE_FLAG_OPEN_REPARSE_POINT
+    if directory:
+        flags |= FILE_FLAG_BACKUP_SEMANTICS
     handle = _kernel32.CreateFileW(
         str(path),
         desired_access,
@@ -120,6 +159,33 @@ def _open_handle(path, *, directory):
     if handle == INVALID_HANDLE_VALUE:
         _win_error("CreateFileW failed")
     return handle
+
+
+def _attribute_tag(handle):
+    info = _FileAttributeTagInfo()
+    if not _kernel32.GetFileInformationByHandleEx(
+        handle,
+        FILE_ATTRIBUTE_TAG_INFO_CLASS,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+    ):
+        _win_error("GetFileInformationByHandleEx failed")
+    return info
+
+
+def _reject_reparse(handle):
+    info = _attribute_tag(handle)
+    if info.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT:
+        raise ValueError("reparse path components are not restore authority")
+    return info
+
+
+def _reject_unsafe_hardlinks(handle):
+    info = _ByHandleFileInformation()
+    if not _kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
+        _win_error("GetFileInformationByHandle failed")
+    if info.number_of_links != 1:
+        raise ValueError("hardlink aliases are not restore authority")
 
 
 def _close_handle(handle):
@@ -170,6 +236,18 @@ def _capture(handle):
     )
 
 
+def _component_evidence(handle):
+    attribute_tag = _reject_reparse(handle)
+    final_path = _volume_guid_path(handle)
+    _reject_alternate_data_stream(final_path)
+    return WindowsPathComponentEvidence(
+        final_path=final_path,
+        identity=_identity(handle),
+        file_attributes=attribute_tag.file_attributes,
+        reparse_tag=attribute_tag.reparse_tag,
+    )
+
+
 def _volume_guid_path(handle):
     buffer = ctypes.create_unicode_buffer(32768)
     length = _kernel32.GetFinalPathNameByHandleW(
@@ -181,6 +259,12 @@ def _volume_guid_path(handle):
     if length == 0 or length >= len(buffer):
         _win_error("GetFinalPathNameByHandleW failed")
     return buffer.value
+
+
+def _reject_alternate_data_stream(path):
+    _, tail = os.path.splitdrive(os.path.abspath(path))
+    if ":" in tail:
+        raise ValueError("alternate data stream paths are not restore authority")
 
 
 def _directory_chain(target):
@@ -220,19 +304,37 @@ class RetainedWindowsPath:
         self.trusted_root = Path(trusted_root).absolute()
         self.target = Path(target).absolute()
         self._handles = []
+        self._directory_paths = []
+        self._trusted_root_index = None
         self.confirmed = None
         self.dispatch_path = None
+        self.component_evidence = ()
+        self.recapture_count = 0
 
     def __enter__(self):
+        _reject_alternate_data_stream(self.trusted_root)
+        _reject_alternate_data_stream(self.target)
         if os.path.commonpath((self.trusted_root, self.target)) != str(self.trusted_root):
             raise ValueError("target must be contained by trusted root")
         try:
-            for directory in _directory_chain(self.target):
-                self._handles.append(_open_handle(directory, directory=True))
+            self._directory_paths = _directory_chain(self.target)
+            normalized_root = os.path.normcase(os.path.normpath(self.trusted_root))
+            self._trusted_root_index = next(
+                index
+                for index, directory in enumerate(self._directory_paths)
+                if os.path.normcase(os.path.normpath(directory)) == normalized_root
+            )
+            for directory in self._directory_paths:
+                directory_handle = _open_handle(directory, directory=True)
+                self._handles.append(directory_handle)
+                _reject_reparse(directory_handle)
             target_handle = _open_handle(self.target, directory=False)
             self._handles.append(target_handle)
+            _reject_reparse(target_handle)
+            _reject_unsafe_hardlinks(target_handle)
             self.confirmed = _capture(target_handle)
-            self.dispatch_path = _volume_guid_path(target_handle)
+            self.component_evidence = self._capture_component_chain()
+            self.dispatch_path = self.component_evidence[-1].final_path
             return self
         except Exception:
             self.close()
@@ -251,12 +353,59 @@ class RetainedWindowsPath:
         while self._handles:
             _close_handle(self._handles.pop())
 
+    def _capture_component_chain(self):
+        evidence = tuple(_component_evidence(handle) for handle in self._handles)
+        volumes = {item.identity.volume_serial_number for item in evidence}
+        if len(volumes) != 1:
+            raise ValueError("path component identities must share one volume")
+        for parent, child in zip(evidence, evidence[1:]):
+            expected_parent = os.path.normcase(os.path.normpath(parent.final_path))
+            observed_parent = os.path.normcase(os.path.normpath(os.path.dirname(child.final_path)))
+            if observed_parent != expected_parent:
+                raise ValueError("handle-derived path component chain is not contiguous")
+        trusted_final = evidence[self._trusted_root_index].final_path
+        target_final = evidence[-1].final_path
+        if os.path.commonpath((trusted_final, target_final)) != os.path.normpath(trusted_final):
+            raise ValueError("handle-derived target is outside handle-derived trusted root")
+        return evidence
+
+    def _recapture_for_use(self):
+        if not self.all_handles_retained:
+            raise RuntimeError("retained path is closed")
+        _reject_unsafe_hardlinks(self._handles[-1])
+        evidence = self._capture_component_chain()
+        current_target = _capture(self._handles[-1])
+        self.recapture_count += 1
+        if evidence != self.component_evidence or current_target != self.confirmed:
+            raise ValueError("retained path identity changed before use")
+        return evidence[-1].final_path
+
+    def prepare_for_path_use(self):
+        return self._recapture_for_use()
+
+    def verify_path_use(self, opened_scene):
+        self._recapture_for_use()
+        if opened_scene != self.confirmed:
+            raise ValueError("SDK path adapter did not open the confirmed scene")
+
 
 class WindowsSdkPathAdapter:
     """Re-open the SDK argument by path and report the object actually read."""
 
-    def open_scene(self, dispatch_path):
+    def open_scene(self, retained_path):
+        if not isinstance(retained_path, RetainedWindowsPath):
+            raise TypeError("open_scene requires a RetainedWindowsPath")
+        dispatch_path = retained_path.prepare_for_path_use()
         handle = _open_handle(dispatch_path, directory=False)
+        try:
+            opened_scene = _capture(handle)
+        finally:
+            _close_handle(handle)
+        retained_path.verify_path_use(opened_scene)
+        return opened_scene
+
+    def open_path_for_control(self, path):
+        handle = _open_handle(path, directory=False)
         try:
             return _capture(handle)
         finally:
