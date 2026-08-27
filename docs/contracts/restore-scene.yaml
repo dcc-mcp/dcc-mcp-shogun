@@ -133,13 +133,17 @@ async_job_contract:
     crash_after_reservation: possible_dispatch_unknown
     recovery_redispatch: forbidden
     terminal_not_dispatched_after_reservation: forbidden
-    handle_owner: trusted_adapter_local_restore_job_registry
+    handle_owner: exact_process_epoch_lease_until_terminal_cleanup
     guarantee_without_sdk_transaction_or_idempotency: at_most_once_not_exactly_once
   process_boundary:
     executable_harness: subprocess_sqlite_and_kernel_lease
     owner_claim_persistence: sqlite_full_sync_before_process_exit
     request_local_objects: forbidden_across_process_boundary
     lease: kernel_released_exclusive_file_lock
+    lease_binding: prior_epoch_token_must_match_durable_owner
+    dispatch_reservation_owner: exact_process_epoch_lease
+    dispatch_owner_exit: terminalize_failed_unknown_without_guard_inheritance
+    dispatch_recovery: zero_redispatch_cleanup_tombstone_notification
     takeover: only_after_prior_process_lease_release
     successor_race: exactly_one_terminal_compare_and_set
     orphan_readback: zero_sdk_readback_failed_unknown_readback_owner_lost
@@ -1089,7 +1093,7 @@ private_audit_result_schema:
                 - released_after_terminal_unknown
                 - trusted_adapter_local_restore_job_registry
                 - cleanup_ownership_indeterminate_registry_quarantine
-            dispatch_count: {type: integer, const: 1}
+            dispatch_count: {type: integer, minimum: 0, maximum: 1}
             dispatch_attempt_reserved: {type: boolean, const: true}
             poll_allowed: {type: boolean, const: false}
             late_completion_disposition: {type: string, const: not_applicable}
@@ -1102,6 +1106,15 @@ private_audit_result_schema:
                 - release_indeterminate_quarantined
             terminal_event_id: {type: string}
             terminal_event_digest_sha256: {type: string}
+        - oneOf:
+            - properties:
+                snapshot_source: {const: official_sdk_failure}
+                terminal_source: {const: official_sdk_failure}
+                dispatch_count: {const: 1}
+            - properties:
+                snapshot_source: {const: readback_owner_lost}
+                terminal_source: {const: readback_owner_lost}
+                dispatch_count: {minimum: 0, maximum: 1}
         - oneOf:
             - properties:
                 cancellation_disposition: {const: not_requested}
@@ -1738,7 +1751,7 @@ output_schema:
                 - released_after_terminal_unknown
                 - trusted_adapter_local_restore_job_registry
                 - cleanup_ownership_indeterminate_registry_quarantine
-            dispatch_count: {type: integer, const: 1}
+            dispatch_count: {type: integer, minimum: 0, maximum: 1}
             dispatch_attempt_reserved: {type: boolean, const: true}
             poll_allowed: {type: boolean, const: false}
             late_completion_disposition: {type: string, const: not_applicable}
@@ -1750,6 +1763,15 @@ output_schema:
                 - released_after_error_verified_closed
                 - release_indeterminate_quarantined
             terminal_event_hmac_sha256: {type: string}
+        - oneOf:
+            - properties:
+                snapshot_source: {const: official_sdk_failure}
+                terminal_source: {const: official_sdk_failure}
+                dispatch_count: {const: 1}
+            - properties:
+                snapshot_source: {const: readback_owner_lost}
+                terminal_source: {const: readback_owner_lost}
+                dispatch_count: {minimum: 0, maximum: 1}
         - oneOf:
             - properties:
                 cancellation_disposition: {const: not_requested}
@@ -1837,6 +1859,7 @@ output_schema:
             - confirmation_cas
             - target_guard
             - official_sdk_failure
+            - readback_owner_loss
             - request_timeout
             - transport_loss
             - cancellation_after_dispatch
@@ -1949,8 +1972,25 @@ output_schema:
             before_receipt: {$ref: "#/$defs/public_audit_projection"}
             after_receipt: {type: "null"}
             postcondition_status: {const: unknown}
-            failure_stage: {const: official_sdk_failure}
+            failure_stage: {enum: [official_sdk_failure, readback_owner_loss]}
             job: {$ref: "#/$defs/public_terminal_unknown_job"}
+        - oneOf:
+            - properties:
+                failure_stage: {const: official_sdk_failure}
+                job:
+                  allOf:
+                    - {$ref: "#/$defs/public_terminal_unknown_job"}
+                    - properties:
+                        snapshot_source: {const: official_sdk_failure}
+                        terminal_source: {const: official_sdk_failure}
+            - properties:
+                failure_stage: {const: readback_owner_loss}
+                job:
+                  allOf:
+                    - {$ref: "#/$defs/public_terminal_unknown_job"}
+                    - properties:
+                        snapshot_source: {const: readback_owner_lost}
+                        terminal_source: {const: readback_owner_lost}
     public_pending_context:
       allOf:
         - {$ref: "#/$defs/public_context"}

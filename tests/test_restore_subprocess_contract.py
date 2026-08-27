@@ -5,6 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).parents[1]
@@ -32,9 +33,52 @@ def _start_harness(*args: object) -> subprocess.Popen[str]:
     )
 
 
-def _persist_owner_claim(tmp_path: Path) -> None:
-    owner = _run_harness("owner-claim", tmp_path, tmp_path / "owner-result.json")
+def _persist_owner_claim(tmp_path: Path, command: str = "owner-claim") -> None:
+    owner = _run_harness(command, tmp_path, tmp_path / "owner-result.json")
     assert owner.returncode == 0, owner.stderr
+
+
+def test_sdk_entry_process_exit_terminalizes_without_guard_inheritance_or_redispatch(
+    tmp_path,
+):
+    result_path = tmp_path / "dispatch-owner-result.json"
+
+    owner = _run_harness("dispatch-owner", tmp_path, result_path)
+
+    assert owner.returncode == 0, owner.stderr
+    owner_result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert owner_result == {
+        "job_id": "restore-job-cross-process-0001",
+        "status": "dispatch_uncertain",
+        "handle_disposition": "owned_by_process_epoch",
+        "sdk_entry_count": 1,
+        "dispatch_count": 0,
+        "process_exited_without_request_cleanup": True,
+    }
+    result_paths = [tmp_path / f"dispatch-successor-{index}.json" for index in range(2)]
+    successors = [_start_harness("recover", tmp_path, path) for path in result_paths]
+    completed = [successor.communicate(timeout=10) for successor in successors]
+    for successor, (_, stderr) in zip(successors, completed):
+        assert successor.returncode == 0, stderr
+
+    results = [json.loads(path.read_text(encoding="utf-8")) for path in result_paths]
+    assert sorted(result["terminalized_by_this_process"] for result in results) == [False, True]
+    assert {result["status"] for result in results} == {"terminal"}
+    assert {result["outcome"] for result in results} == {"failed_unknown"}
+    assert {result["terminal_source"] for result in results} == {"readback_owner_lost"}
+
+    query = _run_harness("query", tmp_path)
+    assert query.returncode == 0, query.stderr
+    durable = json.loads(query.stdout)
+    assert durable["sdk_entry_count"] == 1
+    assert durable["dispatch_count"] == 0
+    assert durable["sdk_readback_count"] == 0
+    assert durable["terminalize_count"] == 1
+    assert durable["claim_epoch"] == durable["terminalizer_epoch"]
+    assert durable["handle_disposition"] == "kernel_closed_on_process_death"
+    assert durable["cleanup_disposition"] == "released_after_error_verified_closed"
+    assert durable["tombstone"]["terminal_source"] == "readback_owner_lost"
+    assert durable["notification"]["pending"] == 1
 
 
 def test_process_a_persists_readback_claim_before_real_process_exit(tmp_path):
@@ -75,14 +119,16 @@ def test_exactly_one_successor_recovers_the_dead_process_claim(tmp_path):
     assert query.returncode == 0, query.stderr
     durable = json.loads(query.stdout)
     assert durable["terminalize_count"] == 1
+    assert durable["claim_epoch"] == durable["terminalizer_epoch"]
     assert durable["dispatch_count"] == 1
     assert durable["sdk_readback_count"] == 0
     assert durable["handle_disposition"] == "kernel_closed_on_process_death"
     assert durable["cleanup_disposition"] == "released_after_error_verified_closed"
 
 
-def test_cleanup_and_tombstone_reconcile_after_successor_crash(tmp_path):
-    _persist_owner_claim(tmp_path)
+@pytest.mark.parametrize("owner_command", ("owner-claim", "dispatch-owner"))
+def test_cleanup_and_tombstone_reconcile_after_successor_crash(tmp_path, owner_command):
+    _persist_owner_claim(tmp_path, owner_command)
     crashed = _run_harness(
         "recover",
         tmp_path,
@@ -120,8 +166,12 @@ def test_cleanup_and_tombstone_reconcile_after_successor_crash(tmp_path):
     }
 
 
-def test_notification_baseexception_replays_to_multiple_process_waiters(tmp_path):
-    _persist_owner_claim(tmp_path)
+@pytest.mark.parametrize("owner_command", ("owner-claim", "dispatch-owner"))
+def test_notification_baseexception_replays_to_multiple_process_waiters(
+    tmp_path,
+    owner_command,
+):
+    _persist_owner_claim(tmp_path, owner_command)
     endpoint_path = tmp_path / "notification-broker.json"
     broker = _start_harness("broker", endpoint_path)
     waiters: list[subprocess.Popen[str]] = []
@@ -224,6 +274,10 @@ def test_published_contract_requires_the_executable_process_boundary():
         "owner_claim_persistence": "sqlite_full_sync_before_process_exit",
         "request_local_objects": "forbidden_across_process_boundary",
         "lease": "kernel_released_exclusive_file_lock",
+        "lease_binding": "prior_epoch_token_must_match_durable_owner",
+        "dispatch_reservation_owner": "exact_process_epoch_lease",
+        "dispatch_owner_exit": "terminalize_failed_unknown_without_guard_inheritance",
+        "dispatch_recovery": "zero_redispatch_cleanup_tombstone_notification",
         "takeover": "only_after_prior_process_lease_release",
         "successor_race": "exactly_one_terminal_compare_and_set",
         "orphan_readback": "zero_sdk_readback_failed_unknown_readback_owner_lost",
@@ -240,6 +294,8 @@ def test_published_contract_requires_the_executable_process_boundary():
         "real subprocess boundary",
         "SQLite",
         "kernel-released exclusive file lease",
+        "dispatch reservation is bound to the exact process-epoch lease",
+        "`BaseException` abandons the durable readback claim",
         "request-local locks, weak references, guards, and waiters",
         "kernel_closed_on_process_death",
         "surviving authenticated local notification broker",

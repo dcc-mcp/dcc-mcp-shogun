@@ -216,6 +216,15 @@ before/after terminal receipt or explicit unknown effect
 - Durability claims require a real subprocess boundary. The executable harness
   persists the claim and revisions in SQLite with full synchronous commits and
   holds a kernel-released exclusive file lease for the registry-process epoch.
+  The lease file retains the prior epoch token under that kernel lock; takeover
+  is valid only when it matches the durable record's owner epoch, and the
+  successor CAS writes its own epoch before recovery advances.
+  Every durable dispatch reservation is bound to the exact process-epoch lease
+  that owns the request-local guard. If that process exits after SDK entry, a
+  successor can acquire the released lease but cannot inherit the guard or
+  numeric handles and cannot redispatch. It records the kernel-close-on-process-
+  death disposition and converges through cleanup, tombstone, and notification
+  to failed unknown.
   Process A exits with `os._exit` after persisting `readback_in_progress`;
   independent Process-B successors reopen only the database and lease. They never inherit or
   serialize request-local locks, weak references, guards, and waiters.
@@ -243,6 +252,10 @@ before/after terminal receipt or explicit unknown effect
   terminal-event, and receipt/observation projections plus bounded lifecycle
   enums and counters. It never copies a private audit object into a public
   context.
+  A private `readback_owner_lost` terminal source projects only to the redacted
+  public `readback_owner_loss` failure stage. The whole-result schema binds
+  those nested values together; `official_sdk_failure` cannot describe owner
+  loss, and owner loss cannot be reported as an ordinary SDK failure.
 - `jobs_get_status` accepts only one exact `job_id`. It performs a trusted
   registry lookup and never dispatches, retries, or reconstructs the restore
   request. Every result binds `context.request_id` to the job's request ID, and
@@ -317,6 +330,13 @@ before/after terminal receipt or explicit unknown effect
   pending record, releases or quarantines only the retained guard identity, and
   uses the same replayable terminal, tombstone, and waiter-notification
   protocol. The old claim remains fenced and can never complete afterward.
+  In a still-running process, a cancellation or any other failure derived from
+  `BaseException` abandons the durable readback claim before control-flow
+  propagation. The
+  exact claim fence first advances to replayable cleanup and failed-unknown
+  terminalization, releases only its own guard, writes the tombstone, and
+  notifies waiters. It therefore cannot strand `readback_in_progress`, permit
+  redispatch, or expose the private exception through a public result.
   A cancellation arriving while that claim owns read-back is written as a
   durable, HMAC-bound claim-bound cancellation intent in a separate audit
   record. It does not advance the claimed job revision. The terminal CAS folds

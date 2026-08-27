@@ -16,9 +16,13 @@ class InjectedNotificationBaseException(BaseException):
 
 
 class ProcessEpochLease:
-    def __init__(self, state_dir: Path):
+    def __init__(self, state_dir: Path, epoch: str):
         state_dir.mkdir(parents=True, exist_ok=True)
-        self._handle = (state_dir / "registry-process.lock").open("a+b")
+        if len(epoch) != 32 or any(character not in "0123456789abcdef" for character in epoch):
+            raise ValueError("process epoch identity rejected")
+        lease_path = state_dir / "registry-process.lock"
+        lease_path.touch(exist_ok=True)
+        self._handle = lease_path.open("r+b")
         self._handle.seek(0, os.SEEK_END)
         if self._handle.tell() == 0:
             self._handle.write(b"0")
@@ -32,6 +36,14 @@ class ProcessEpochLease:
             import fcntl
 
             fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX)
+        self._handle.seek(0)
+        self.previous_epoch = self._handle.read().decode("ascii")
+        self.epoch = epoch
+        self._handle.seek(0)
+        self._handle.truncate()
+        self._handle.write(epoch.encode("ascii"))
+        self._handle.flush()
+        os.fsync(self._handle.fileno())
 
 
 def _connect(state_dir: Path) -> sqlite3.Connection:
@@ -48,6 +60,7 @@ def _connect(state_dir: Path) -> sqlite3.Connection:
             owner_pid INTEGER NOT NULL,
             handle_disposition TEXT NOT NULL,
             record_revision INTEGER NOT NULL,
+            sdk_entry_count INTEGER NOT NULL DEFAULT 0,
             dispatch_count INTEGER NOT NULL,
             sdk_readback_count INTEGER NOT NULL,
             outcome TEXT,
@@ -178,9 +191,9 @@ def stop_broker(endpoint_path_value: str) -> None:
 
 def persist_owner_claim(state_dir_value: str, result_path_value: str) -> None:
     state_dir = Path(state_dir_value)
-    _lease = ProcessEpochLease(state_dir)
-    connection = _connect(state_dir)
     claim_epoch = uuid.uuid4().hex
+    _lease = ProcessEpochLease(state_dir, claim_epoch)
+    connection = _connect(state_dir)
     with connection:
         connection.execute(
             """
@@ -213,6 +226,46 @@ def persist_owner_claim(state_dir_value: str, result_path_value: str) -> None:
     os._exit(0)
 
 
+def persist_dispatch_reservation(state_dir_value: str, result_path_value: str) -> None:
+    state_dir = Path(state_dir_value)
+    claim_epoch = uuid.uuid4().hex
+    _lease = ProcessEpochLease(state_dir, claim_epoch)
+    connection = _connect(state_dir)
+    with connection:
+        connection.execute(
+            """
+            INSERT INTO jobs (
+                job_id, status, claim_epoch, owner_pid,
+                handle_disposition, record_revision,
+                sdk_entry_count, dispatch_count, sdk_readback_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                JOB_ID,
+                "dispatch_uncertain",
+                claim_epoch,
+                os.getpid(),
+                "owned_by_process_epoch",
+                1,
+                1,
+                0,
+                0,
+            ),
+        )
+    _write_json(
+        Path(result_path_value),
+        {
+            "job_id": JOB_ID,
+            "status": "dispatch_uncertain",
+            "handle_disposition": "owned_by_process_epoch",
+            "sdk_entry_count": 1,
+            "dispatch_count": 0,
+            "process_exited_without_request_cleanup": True,
+        },
+    )
+    os._exit(0)
+
+
 def query(state_dir_value: str) -> None:
     connection = _connect(Path(state_dir_value))
     row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (JOB_ID,)).fetchone()
@@ -239,35 +292,61 @@ def recover(
     broker_endpoint: str | None,
 ) -> None:
     state_dir = Path(state_dir_value)
-    _lease = ProcessEpochLease(state_dir)
-    connection = _connect(state_dir)
     successor_epoch = uuid.uuid4().hex
+    _lease = ProcessEpochLease(state_dir, successor_epoch)
+    connection = _connect(state_dir)
     connection.execute("BEGIN IMMEDIATE")
     row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (JOB_ID,)).fetchone()
     if row is None:
         connection.rollback()
         raise RuntimeError("durable restore job was not found")
     entered_cleanup = False
-    if row["status"] == "readback_in_progress":
+    if row["status"] in {"dispatch_uncertain", "readback_in_progress"}:
+        if row["claim_epoch"] != _lease.previous_epoch:
+            connection.rollback()
+            raise RuntimeError("process epoch lease binding rejected")
+        orphaned_status = row["status"]
         updated = connection.execute(
             """
             UPDATE jobs
             SET status = ?, handle_disposition = ?, record_revision = record_revision + 1,
-                cleanup_disposition = ?
+                cleanup_disposition = ?, claim_epoch = ?, owner_pid = ?
             WHERE job_id = ? AND status = ?
             """,
             (
                 "cleanup_pending",
                 "kernel_closed_on_process_death",
                 "released_after_error_verified_closed",
+                successor_epoch,
+                os.getpid(),
                 JOB_ID,
-                "readback_in_progress",
+                orphaned_status,
             ),
         )
         if updated.rowcount != 1:
             connection.rollback()
             raise RuntimeError("orphan recovery CAS was lost")
         entered_cleanup = True
+    elif row["status"] == "cleanup_pending":
+        if row["claim_epoch"] != _lease.previous_epoch:
+            connection.rollback()
+            raise RuntimeError("process epoch lease binding rejected")
+        updated = connection.execute(
+            """
+            UPDATE jobs SET claim_epoch = ?, owner_pid = ?
+            WHERE job_id = ? AND status = ? AND claim_epoch = ?
+            """,
+            (
+                successor_epoch,
+                os.getpid(),
+                JOB_ID,
+                "cleanup_pending",
+                _lease.previous_epoch,
+            ),
+        )
+        if updated.rowcount != 1:
+            connection.rollback()
+            raise RuntimeError("cleanup process epoch CAS was lost")
     connection.commit()
     if crash_after_cleanup_pending and entered_cleanup:
         os._exit(23)
@@ -360,6 +439,9 @@ def main() -> None:
     owner = subparsers.add_parser("owner-claim")
     owner.add_argument("state_dir")
     owner.add_argument("result_path")
+    dispatch_owner = subparsers.add_parser("dispatch-owner")
+    dispatch_owner.add_argument("state_dir")
+    dispatch_owner.add_argument("result_path")
     query_parser = subparsers.add_parser("query")
     query_parser.add_argument("state_dir")
     recover_parser = subparsers.add_parser("recover")
@@ -379,6 +461,8 @@ def main() -> None:
 
     if args.command == "owner-claim":
         persist_owner_claim(args.state_dir, args.result_path)
+    elif args.command == "dispatch-owner":
+        persist_dispatch_reservation(args.state_dir, args.result_path)
     elif args.command == "query":
         query(args.state_dir)
     elif args.command == "recover":
