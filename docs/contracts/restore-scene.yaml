@@ -257,6 +257,30 @@ canonicalization:
         raw_get_scene_name: ['C:/Approved/recovery', marked_take.vdf]
         raw_get_frame_count: -1
         disposition: reject_negative_frame_count
+      - name: relative_forward_slash
+        raw_get_scene_name: ['C:/Approved/recovery', 'nested/marked_take.vdf']
+        raw_get_frame_count: 240
+        disposition: reject_relative_path_with_separator
+      - name: relative_backslash
+        raw_get_scene_name: ['C:/Approved/recovery', 'nested\marked_take.vdf']
+        raw_get_frame_count: 240
+        disposition: reject_relative_path_with_separator
+      - name: wrong_arity_one
+        raw_get_scene_name: ['C:/Approved/recovery']
+        raw_get_frame_count: 240
+        disposition: reject_wrong_arity
+      - name: wrong_arity_three
+        raw_get_scene_name: ['C:/Approved/recovery', marked_take.vdf, unexpected]
+        raw_get_frame_count: 240
+        disposition: reject_wrong_arity
+      - name: non_string_scene_path
+        raw_get_scene_name: [123, marked_take.vdf]
+        raw_get_frame_count: 240
+        disposition: reject_non_string_tuple_member
+      - name: non_string_name_or_path
+        raw_get_scene_name: ['C:/Approved/recovery', 123]
+        raw_get_frame_count: 240
+        disposition: reject_non_string_tuple_member
 
 target_guard:
   strategy: pin_full_windows_namespace_chain_through_dispatch
@@ -281,7 +305,7 @@ target_guard:
     - after_official_sdk_before_receipt_capture_completed
     - after_all_pinned_handle_and_target_receipt_recapture
     - immediately_before_confirmation_cas
-    - dispatch_entry_with_full_chain_still_held
+    - dispatch_entry_before_confirmation_cas_with_full_chain_still_held
   predispatch_recapture: all_pinned_handle_identities_and_target_receipt_immediately_before_confirmation_cas
   change_before_cas: target_guard_rejected_without_consume_or_dispatch
   swap_attempt_while_pinned: blocked_by_windows_share_contract
@@ -289,6 +313,15 @@ target_guard:
     phases: [preflight, recapture, cas, dispatch]
     swap_kinds: [namespace, junction, parent, same_content]
     predispatch_change_invariant: consume_count_equals_dispatch_count_equals_zero
+  windows_integration_proof:
+    platform: windows_ci_real_filesystem
+    sdk_boundary: CreateFileW_reopens_volume_guid_path
+    retained_through_open: volume_root_every_directory_and_target_handles
+    identity_assertion: reopened_volume_serial_and_128_bit_file_id_equal_confirmed_target
+    attack_kinds: [target, parent, junction, namespace, same_content]
+    attack_outcome_while_retained: windows_sharing_violation_and_confirmed_identity_loaded
+    control_after_release: same_swap_succeeds_and_path_identity_changes
+    real_shogun_invoked: false
   readback_match: official_sdk_active_scene_to_guarded_confirmation_identity
 
 input_schema:

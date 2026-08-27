@@ -574,7 +574,7 @@ class FakeGuardedTargetBoundary:
         return self.current_namespace_identity == token["namespace_identity"]
 
     def dispatch_capability(self, token):
-        assert self.checkpoint_identity(token, "dispatch")
+        assert token["held"] is True
         return {
             "dispatch_path": token["dispatch_path"],
             "pinned_objects": token["pinned_objects"],
@@ -619,6 +619,10 @@ class FakeRestoreWorkflow:
             self.conflicting_replace_observations.append(self.guard.conflicting_replace_allowed())
             self.before_cas_barrier.wait()
             if not self.guard.checkpoint_identity(guard_token, "cas"):
+                result = _result("target_guard_rejected")
+                result["context"]["before_receipt"] = before_receipt
+                return result
+            if not self.guard.checkpoint_identity(guard_token, "dispatch"):
                 result = _result("target_guard_rejected")
                 result["context"]["before_receipt"] = before_receipt
                 return result
@@ -1017,6 +1021,26 @@ def test_windows_swap_attempt_is_blocked_by_full_pinned_chain_through_dispatch(p
     _validate_result(result)
 
 
+def test_dispatch_entry_identity_change_rejects_before_confirmation_consumption():
+    request = _request()
+    store = FakeTrustedConfirmationStore()
+    store.issue(request, authenticated=True)
+    sdk = FakeOfficialSdkBoundary()
+    guard = FakeGuardedTargetBoundary(
+        observed_change_phase="dispatch",
+        attack_kind="same_content",
+    )
+    workflow = FakeRestoreWorkflow(store, sdk, guard, Barrier(1))
+
+    result = workflow.execute(request)
+
+    assert result["context"]["state"] == "target_guard_rejected"
+    assert store.consume_count == sdk.dispatch_count == sdk.readback_count == 0
+    assert guard.changed_objects == ["target_file"]
+    assert guard.release_count == 1
+    _validate_result(result)
+
+
 def test_confirmation_authority_defines_trusted_issuance_lookup_compare_and_consume():
     authority = _contract()["confirmation_authority"]
 
@@ -1076,7 +1100,7 @@ def test_target_guard_freezes_exact_confirmed_file_through_dispatch_and_readback
             "after_official_sdk_before_receipt_capture_completed",
             "after_all_pinned_handle_and_target_receipt_recapture",
             "immediately_before_confirmation_cas",
-            "dispatch_entry_with_full_chain_still_held",
+            "dispatch_entry_before_confirmation_cas_with_full_chain_still_held",
         ],
         "predispatch_recapture": (
             "all_pinned_handle_identities_and_target_receipt_immediately_before_confirmation_cas"
@@ -1088,7 +1112,38 @@ def test_target_guard_freezes_exact_confirmed_file_through_dispatch_and_readback
             "swap_kinds": ["namespace", "junction", "parent", "same_content"],
             "predispatch_change_invariant": "consume_count_equals_dispatch_count_equals_zero",
         },
+        "windows_integration_proof": {
+            "platform": "windows_ci_real_filesystem",
+            "sdk_boundary": "CreateFileW_reopens_volume_guid_path",
+            "retained_through_open": "volume_root_every_directory_and_target_handles",
+            "identity_assertion": (
+                "reopened_volume_serial_and_128_bit_file_id_equal_confirmed_target"
+            ),
+            "attack_kinds": ["target", "parent", "junction", "namespace", "same_content"],
+            "attack_outcome_while_retained": (
+                "windows_sharing_violation_and_confirmed_identity_loaded"
+            ),
+            "control_after_release": "same_swap_succeeds_and_path_identity_changes",
+            "real_shogun_invoked": False,
+        },
         "readback_match": "official_sdk_active_scene_to_guarded_confirmation_identity",
+    }
+
+
+def test_windows_path_adapter_integration_proves_the_confirmed_object_is_opened():
+    proof = _contract()["target_guard"]["windows_integration_proof"]
+
+    assert proof == {
+        "platform": "windows_ci_real_filesystem",
+        "sdk_boundary": "CreateFileW_reopens_volume_guid_path",
+        "retained_through_open": "volume_root_every_directory_and_target_handles",
+        "identity_assertion": ("reopened_volume_serial_and_128_bit_file_id_equal_confirmed_target"),
+        "attack_kinds": ["target", "parent", "junction", "namespace", "same_content"],
+        "attack_outcome_while_retained": (
+            "windows_sharing_violation_and_confirmed_identity_loaded"
+        ),
+        "control_after_release": "same_swap_succeeds_and_path_identity_changes",
+        "real_shogun_invoked": False,
     }
 
 
@@ -1259,11 +1314,15 @@ def test_scene_identity_is_derived_from_raw_get_scene_name_shapes_and_golden_dig
         ("unsaved_dot_vdf", "unsaved scene"),
         ("malformed_parent_mismatch", "scene path parent mismatch"),
         ("negative_frame_count", "nonnegative integer"),
+        ("relative_forward_slash", "must not contain a path separator"),
+        ("relative_backslash", "must not contain a path separator"),
+        ("wrong_arity_one", "exactly two strings"),
+        ("wrong_arity_three", "exactly two strings"),
+        ("non_string_scene_path", "exactly two strings"),
+        ("non_string_name_or_path", "exactly two strings"),
     ),
 )
-def test_scene_identity_rejects_unsaved_malformed_and_negative_raw_observations(
-    vector_name, error_match
-):
+def test_scene_identity_rejects_invalid_raw_get_scene_name_observations(vector_name, error_match):
     identity_contract = _contract()["canonicalization"]["scene_identity"]
     vector = next(
         item for item in identity_contract["golden_vectors"] if item["name"] == vector_name
@@ -1380,6 +1439,9 @@ def test_adr_preserves_the_design_only_acceptance_boundary():
         "full directory chain",
         "volume-GUID path",
         "same-content replacement",
+        "real Windows filesystem harness",
+        "reopens the volume-GUID path",
+        "after the retained handles are released",
         "target_guard_rejected",
         "atomic insert-if-absent",
         "permanently nonreusable",

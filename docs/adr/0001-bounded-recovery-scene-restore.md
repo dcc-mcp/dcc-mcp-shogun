@@ -89,12 +89,23 @@ before/after terminal receipt or explicit unknown effect
   authority.
 - Revalidate all pinned directory and target identities after the official SDK
   before receipt is captured, after recapturing target bytes and digest, and
-  immediately before confirmation CAS. The dispatch boundary additionally
-  asserts that every pin is still held. The executable adversarial matrix tries
+  immediately before confirmation CAS. Dispatch entry is the final
+  pre-consumption checkpoint: it must establish that every pin is still held
+  before CAS can consume authority. The executable adversarial matrix tries
   namespace, junction, parent-directory, and same-content replacement swaps at
   preflight, recapture, CAS, and dispatch. Attempts while the chain is pinned
   must be blocked; any observed pre-dispatch identity or receipt change fails
   closed without consuming or dispatching.
+- A real Windows filesystem harness retains the volume root, every directory
+  component, and the target with native `CreateFileW` handles while a separate
+  path adapter reopens the volume-GUID path. It compares the independently
+  opened volume serial and 128-bit file ID with the confirmed target, and reads
+  the bytes through that new handle. Target, parent, namespace, real NTFS
+  junction, and same-content replacement attacks must fail while retained and
+  the adapter must load the confirmed identity. Control operations repeat
+  after the retained handles are released; they must then succeed and make the same
+  path resolve to a different file identity. This harness never invokes Shogun
+  and therefore proves Windows path mechanics, not official SDK compatibility.
 - A detected change after host connection returns `target_guard_rejected` with
   unknown effect, the bounded before receipt, null after receipt, and both
   confirmation consumption and SDK dispatch false. The executable invariant is
@@ -171,10 +182,11 @@ before/after terminal receipt or explicit unknown effect
   sorted-key UTF-8 JSON containing exactly `canonical_path_sha256`,
   `frame_count`, and `scene_name`. Independent golden vectors start from raw
   full-path, basename, and decomposed-Unicode observations; rejection vectors
-  cover the unsaved sentinel, malformed parent path, and negative frame count;
-  timestamps, random values, object addresses, and nondeterministic
-  serialization are forbidden. The derived scene name must also equal the
-  receipt's bounded `file_name`.
+  cover the unsaved sentinel, malformed parent path, forward- and backslash
+  relative paths, under- and over-arity tuples, non-string tuple members, and
+  negative frame count; timestamps, random values, object addresses, and
+  nondeterministic serialization are forbidden. The derived scene name must
+  also equal the receipt's bounded `file_name`.
 - `confirmation_consume_rejected` is the CAS-loss connected-but-not-dispatched
   terminal state. It reports `effect=unknown` because the winning concurrent
   consumer may dispatch after this request's before capture; it does not claim
