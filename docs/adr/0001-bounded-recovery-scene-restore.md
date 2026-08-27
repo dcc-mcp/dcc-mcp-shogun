@@ -282,6 +282,14 @@ before/after terminal receipt or explicit unknown effect
   absent, malformed, mismatched, or unverifiable actual read-back terminates as
   stable `failed_unknown`, publishes a null after receipt and fixed public
   message/error only, and keeps the raw observation in private audit data.
+  SDK read-back exceptions and an unserializable read-back follow that same
+  branch; their raw exception text and payload never enter the public result.
+- During late completion, an SDK exception, a resource-limit-plus-one receipt,
+  or an unserializable read-back must terminalize as `failed_unknown` under the
+  exact durable claim fence. The adapter writes the terminal record, releases
+  only that claimant's retained guard, and must notify every waiter. Later or
+  duplicate polling returns the terminal descriptor without another read-back
+  or dispatch.
 - `scene_identity_sha256` is not an opaque implementation choice. Treat
   `GetSceneName` as an exact two-string `(scene_path, name-or-path)` tuple. For a
   saved scene, `scene_path` is an absolute Windows directory. If the second

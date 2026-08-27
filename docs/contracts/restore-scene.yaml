@@ -1,4 +1,4 @@
-contract_version: "1.8"
+contract_version: "1.9"
 status: proposed-design-only
 implementation_authorized: false
 
@@ -58,6 +58,8 @@ synchronous_completion:
   synthetic_fixture_success: forbidden
   classification: shared_guarded_completion_classifier
   mismatch_or_absence: failed_unknown
+  readback_exception: failed_unknown_without_public_diagnostic
+  unserializable_readback: failed_unknown_without_public_payload
   failed_unknown_after_receipt: "null"
   public_payload_projection: fixed_message_and_error_only
 
@@ -174,6 +176,15 @@ async_job_contract:
       exact_before_readback: failed_unchanged
       malformed_mismatched_or_unbounded_readback: failed_unknown
     receipt_digest_mismatch: failed_unknown
+    readback_boundary_failure:
+      sdk_exception: terminal_failed_unknown_under_exact_claim_fence
+      resource_limit_plus_one: terminal_failed_unknown_under_exact_claim_fence
+      unserializable_receipt: terminal_failed_unknown_under_exact_claim_fence
+      after_receipt: "null"
+      public_diagnostic: fixed_message_and_error_only
+      guard_release: after_terminal_cas_for_exact_claim_only
+      waiter_notification: after_terminal_record_and_guard_release
+      duplicate_poll: return_terminal_without_readback_or_dispatch
     claim_fence:
       persistence: durable_atomic_job_record
       owner: adapter_secret_hmac_sha256_v1

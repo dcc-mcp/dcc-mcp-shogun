@@ -896,6 +896,53 @@ def test_malformed_completion_receipt_with_extra_sdk_data_fails_unknown():
     assert result["context"]["job"]["terminal_source"] == "official_sdk_failure"
 
 
+def test_limit_plus_one_late_readback_terminalizes_unknown_and_never_replays():
+    valid_event_receipt = _approved_after_receipt(_request(), _resolver())
+    oversized_readback = json.loads(json.dumps(valid_event_receipt))
+    oversized_readback["sdk_internal_text"] = ""
+    base_size, _ = _completion_receipt_binding(oversized_readback, max_bytes=1_000_000)
+    oversized_readback["sdk_internal_text"] = "x" * (65_537 - base_size)
+    assert _completion_receipt_binding(oversized_readback, max_bytes=65_537)[0] == 65_537
+    sdk = FakeOfficialSdkBoundary(
+        after_receipt=oversized_readback,
+        completion_event_receipt=valid_event_receipt,
+    )
+    workflow, jobs, _, job_id = _pending_async_workflow(sdk=sdk)
+
+    result = workflow.poll(job_id, late_success=True)
+
+    _validate_result(result)
+    assert result["context"]["state"] == "failed_unknown"
+    assert result["context"]["after_receipt"] is None
+    assert "sdk_internal_text" not in json.dumps(result, sort_keys=True)
+    assert result["context"]["job"]["status"] == "terminal"
+    assert jobs.descriptor(job_id)["status"] == "terminal"
+    assert workflow.guard.release_count == 1
+    assert sdk.dispatch_count == sdk.readback_count == 1
+
+    terminal = workflow.poll(job_id, late_success=True)
+    assert terminal == result["context"]["job"]
+    assert workflow.guard.release_count == 1
+    assert sdk.dispatch_count == sdk.readback_count == 1
+
+
+def test_unserializable_late_readback_terminalizes_redacted_unknown():
+    sdk = FakeOfficialSdkBoundary()
+    sdk.after_receipt = {"sdk_internal_text": object()}
+    workflow, jobs, _, job_id = _pending_async_workflow(sdk=sdk)
+
+    result = workflow.poll(job_id, late_success=True)
+
+    _validate_result(result)
+    assert result["context"]["state"] == "failed_unknown"
+    assert result["context"]["after_receipt"] is None
+    assert result["message"] == "Recovery scene restore did not reach verified success."
+    assert result["error"] == "RestoreFailedUnknown"
+    assert jobs.descriptor(job_id)["status"] == "terminal"
+    assert workflow.guard.release_count == 1
+    assert sdk.dispatch_count == sdk.readback_count == 1
+
+
 def test_late_readback_equal_to_before_terminalizes_failed_unchanged():
     before_receipt = _scene_receipt("working_scene.vdf", "b" * 64, "c" * 64)
     sdk = FakeOfficialSdkBoundary(after_receipt=before_receipt)
@@ -1913,13 +1960,17 @@ class FakeRestoreWorkflow:
                 result["context"]["before_receipt"] = before_receipt
                 return result
             self.sdk.dispatch_restore(self.guard.dispatch_capability(guard_token))
-            actual_receipt = self.sdk.readback_after()
-            outcome = _classify_guarded_completion(
-                before_receipt=before_receipt,
-                actual_receipt=actual_receipt,
-                approved_recovery_receipt=request["recovery_receipt"],
-                approved_target_identity=ticket["approved_target_identity"],
-            )
+            try:
+                actual_receipt = self.sdk.readback_after()
+                outcome = _classify_guarded_completion(
+                    before_receipt=before_receipt,
+                    actual_receipt=actual_receipt,
+                    approved_recovery_receipt=request["recovery_receipt"],
+                    approved_target_identity=ticket["approved_target_identity"],
+                )
+            except Exception:
+                actual_receipt = None
+                outcome = "failed_unknown"
             result = _result(outcome)
             result["context"]["approved_recovery_receipt"] = json.loads(
                 json.dumps(request["recovery_receipt"])
@@ -2424,8 +2475,12 @@ class FakeAsyncRestoreJobRegistry:
                 raise RuntimeError("late completion fence rejected")
             if not self._claim_fence_matches(record, claim, event):
                 raise RuntimeError("late completion fence rejected")
-            _, actual_receipt_digest = _completion_receipt_binding(actual_receipt)
-            outcome = self._classify_completion(record, actual_receipt)
+            try:
+                _, actual_receipt_digest = _completion_receipt_binding(actual_receipt)
+                outcome = self._classify_completion(record, actual_receipt)
+            except Exception:
+                actual_receipt_digest = None
+                outcome = "failed_unknown"
             if actual_receipt_digest != event["completion_receipt_sha256"]:
                 outcome = "failed_unknown"
             succeeded_or_unchanged = outcome in {"succeeded", "failed_unchanged"}
@@ -2578,7 +2633,10 @@ class FakeAsyncRestoreWorkflow:
                 result = _result(audit["terminal_outcome"])
                 result["context"]["job"] = terminal
                 return result
-            actual_receipt = self.sdk.readback_after()
+            try:
+                actual_receipt = self.sdk.readback_after()
+            except Exception:
+                actual_receipt = None
             outcome = self.jobs.complete_guarded_readback(claim, actual_receipt)
             audit = self.jobs.audit_context(job_id)
             result = _result(outcome)
@@ -2597,7 +2655,7 @@ class FakeAsyncRestoreWorkflow:
 def test_restore_contract_is_design_only_and_fail_closed():
     contract = _contract()
 
-    assert contract["contract_version"] == "1.8"
+    assert contract["contract_version"] == "1.9"
     assert contract["status"] == "proposed-design-only"
     assert contract["implementation_authorized"] is False
     assert contract["operation"] == {
@@ -3037,6 +3095,39 @@ def test_synchronous_restore_without_actual_readback_fails_unknown_without_paylo
     assert result["message"] == "Recovery scene restore did not reach verified success."
     assert result["error"] == "RestoreFailedUnknown"
     assert store.consume_count == sdk.dispatch_count == sdk.readback_count == 1
+
+
+@pytest.mark.parametrize("failure_kind", ("sdk_exception", "unserializable"))
+def test_synchronous_restore_readback_failure_is_redacted_failed_unknown(failure_kind):
+    request = _request()
+    store = FakeTrustedConfirmationStore()
+    store.issue(request, authenticated=True)
+    sdk = FakeOfficialSdkBoundary()
+    secret = "SDK readback leaked C:\\secret\\take.vdf token-123"
+    if failure_kind == "sdk_exception":
+
+        def failing_readback():
+            with sdk._lock:
+                sdk.readback_count += 1
+            raise RuntimeError(secret)
+
+        sdk.readback_after = failing_readback
+    else:
+        sdk.after_receipt = {"sdk_internal_text": object()}
+    guard = FakeGuardedTargetBoundary()
+    workflow = FakeRestoreWorkflow(store, sdk, guard, Barrier(1))
+
+    result = workflow.execute(request)
+
+    _validate_result(result)
+    assert result["context"]["state"] == "failed_unknown"
+    assert result["context"]["after_receipt"] is None
+    assert result["message"] == "Recovery scene restore did not reach verified success."
+    assert result["error"] == "RestoreFailedUnknown"
+    assert secret not in json.dumps(result, sort_keys=True)
+    assert "sdk_internal_text" not in json.dumps(result, sort_keys=True)
+    assert store.consume_count == sdk.dispatch_count == sdk.readback_count == 1
+    assert guard.release_count == 1
 
 
 @pytest.mark.parametrize("phase", ("preflight", "recapture", "cas"))
@@ -3575,6 +3666,8 @@ def test_contract_records_semantic_gates_not_expressible_in_json_schema():
         "synthetic_fixture_success": "forbidden",
         "classification": "shared_guarded_completion_classifier",
         "mismatch_or_absence": "failed_unknown",
+        "readback_exception": "failed_unknown_without_public_diagnostic",
+        "unserializable_readback": "failed_unknown_without_public_payload",
         "failed_unknown_after_receipt": "null",
         "public_payload_projection": "fixed_message_and_error_only",
     }
@@ -3701,6 +3794,16 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
             "malformed_mismatched_or_unbounded_readback": "failed_unknown",
         },
         "receipt_digest_mismatch": "failed_unknown",
+        "readback_boundary_failure": {
+            "sdk_exception": "terminal_failed_unknown_under_exact_claim_fence",
+            "resource_limit_plus_one": "terminal_failed_unknown_under_exact_claim_fence",
+            "unserializable_receipt": "terminal_failed_unknown_under_exact_claim_fence",
+            "after_receipt": "null",
+            "public_diagnostic": "fixed_message_and_error_only",
+            "guard_release": "after_terminal_cas_for_exact_claim_only",
+            "waiter_notification": "after_terminal_record_and_guard_release",
+            "duplicate_poll": "return_terminal_without_readback_or_dispatch",
+        },
         "claim_fence": {
             "persistence": "durable_atomic_job_record",
             "owner": "adapter_secret_hmac_sha256_v1",
@@ -3888,6 +3991,10 @@ def test_adr_preserves_the_design_only_acceptance_boundary():
         "immediately recapture",
         "foreign or replaced",
         "after the terminal CAS",
+        "SDK read-back exceptions",
+        "resource-limit-plus-one",
+        "unserializable read-back",
+        "notify every waiter",
         "8 GiB",
         "streaming SHA-256",
         "64 KiB",
