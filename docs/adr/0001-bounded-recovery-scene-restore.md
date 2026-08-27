@@ -37,10 +37,11 @@ trusted confirmation lookup/compare -> official SDK before receipt
 full Windows namespace chain remains pinned
        | change: target_guard_rejected, no consume or dispatch
                     v
-atomic single-use confirmation consumption
+atomic trusted-time, generation, request, target, receipt revalidation and consumption
        | CAS loss: confirmation_consume_rejected, no dispatch
        v exactly one winner
-one official SDK path dispatch while the chain remains pinned
+durable dispatch-uncertain reservation -> one official SDK path dispatch
+       | crash/transport ambiguity: retain handles, poll only, never redispatch
                     |
                     v
 poll/read only; never replay -> official SDK active-scene read-back
@@ -80,6 +81,12 @@ before/after terminal receipt or explicit unknown effect
   `receipt_version`, scene identity (`file_name`), `file_size_bytes`, `sha256`,
   and `active_scene_changed=false`. The canonical target basename, current byte
   count, and freshly computed SHA-256 must match before dispatch.
+- Reject a file larger than the approved 8 GiB ceiling using the size obtained
+  from the retained target handle before hashing or buffering any bytes. Hash
+  allowed targets with streaming SHA-256 in fixed 64 KiB chunks and verify the
+  exact streamed byte count. Guarded official-SDK completion receipts are also
+  bounded to 64 KiB and hashed as a canonical stream rather than accumulated
+  as one unbounded result value.
 - The official SDK consumes a path, so holding only the target file handle does
   not close path-dispatch TOCTOU. Before the first namespace identity capture,
   open and retain the full directory chain from the volume root through the
@@ -161,8 +168,13 @@ before/after terminal receipt or explicit unknown effect
   fails closed. Expired and consumed IDs remain as durable tombstones so record
   pruning cannot make an old identifier issuable again.
 - After connecting and capturing the official SDK `before_receipt`, immediately
-  before dispatch, use an atomic compare-and-set on the stored revision to
-  change unconsumed to consumed. Concurrent consumers can both pass the early
+  before dispatch, use one atomic compare-and-set critical section to obtain
+  trusted current time and revalidate expiry, maximum TTL, authority generation,
+  record revision, every request/path/recovery-receipt binding, the freshly
+  guarded target identity/size/streaming digest, both destructive
+  acknowledgements, and the unconsumed bit before changing unconsumed to
+  consumed. Expiry between lookup and consume therefore loses authority rather
+  than inheriting the earlier freshness decision. Concurrent consumers can both pass the early
   lookup, but exactly one winner may consume and dispatch. A CAS loser returns
   `confirmation_consume_rejected`: host connection and before capture are true,
   dispatch and consumption are false, the bounded before receipt is present,
@@ -211,6 +223,16 @@ before/after terminal receipt or explicit unknown effect
   request is recorded but cannot abort or duplicate the operation. A request
   after any terminal state returns `ignored_after_terminal` without writing the
   terminal record.
+- After confirmation consumption but before calling the irreversible SDK,
+  durably CAS the job to `dispatch-uncertain`, bind that reservation to the
+  exact job generation, operation, confirmation, target, and receipt, and
+  transfer the retained handle chain to the registry. Only that reservation may
+  enter the SDK call, and it authorizes one attempt. `dispatch_count` counts an
+  SDK call whose return was durably confirmed; a crash after call entry may
+  therefore retain count zero while still being possible dispatch. Recovery
+  must never classify such a record as terminal-not-dispatched or safely retry
+  it. Without an SDK transaction or idempotency key this contract promises
+  at-most-once execution, not exactly-once completion.
 - Timeout and transport loss after dispatch have the same non-replay boundary.
   They report a null terminal source and transfer handle-retention ownership to
   the registry. A late official SDK read-back may terminalize only that exact
@@ -218,8 +240,14 @@ before/after terminal receipt or explicit unknown effect
   retained handles. The terminal signal is a typed completion event bound to
   the exact job ID, durable generation, immutable operation binding, expected
   record revision, next event sequence, terminal source, and completion-receipt
-  digest. Its exact event ID and canonical digest are checked before one caller
-  can claim SDK read-back ownership. Repeated polling of either pending or
+  digest derived from the actual official-SDK completion observation. Its exact
+  event ID and canonical digest are checked before one caller can claim SDK
+  read-back ownership. That owner performs a fresh official-SDK scene read-back
+  plus guarded filesystem receipt capture and revalidates the job generation,
+  operation binding, confirmation, approved target, canonical scene-identity
+  digest, and event receipt digest. An approved distinct read-back succeeds; an
+  exact before receipt is failed unchanged; malformed, unbounded, wrong-target,
+  wrong-digest, or event/read-back mismatch is failed unknown. Repeated polling of either pending or
   terminal state cannot increment the dispatch count.
 - Every durable record write uses the registry CAS lock, increments a strictly
   monotonic `record_revision`, and consumes only the next `event_sequence`.
@@ -238,7 +266,10 @@ before/after terminal receipt or explicit unknown effect
 - Capture a bounded `before_receipt` through the official SDK before consuming
   the confirmation. Verified success requires an `after_receipt` from a fresh
   official SDK read-back. Both receipts include SDK scene identity and bounded
-  filesystem name, byte-count, and SHA-256 evidence.
+  filesystem name, byte-count, and SHA-256 evidence. Late completion cannot
+  construct success from a status flag: the guarded read-back receipt itself
+  must match the exact completion-receipt digest and all confirmation/job/target
+  bindings.
 - `scene_identity_sha256` is not an opaque implementation choice. Treat
   `GetSceneName` as an exact two-string `(scene_path, name-or-path)` tuple. For a
   saved scene, `scene_path` is an absolute Windows directory. If the second
@@ -317,7 +348,7 @@ recovery is part of this ADR.
 
 - A future implementation needs durable single-use confirmation state and a
   stable official SDK scene-load capability before it can be proposed.
-- Hashing the approved VDF twice adds bounded I/O and can reject a file changed
+- Streaming the approved VDF twice adds bounded I/O and can reject a file changed
   between recovery save and restore.
 
 ### Neutral

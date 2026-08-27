@@ -80,6 +80,7 @@ def _job_descriptor(
     cancellation_requested = cancellation_disposition != "not_requested"
     cancellation_effective = cancellation_disposition == "honored_before_dispatch"
     terminal = status in {"terminal", "terminal_not_dispatched"}
+    dispatch_attempt_reserved = status != "terminal_not_dispatched"
     return {
         "job_id": "rj1-" + "9" * 64,
         "job_generation": "0000000000000001",
@@ -94,6 +95,7 @@ def _job_descriptor(
         "cancellation_disposition": cancellation_disposition,
         "handle_retention_owner": handle_retention_owner,
         "dispatch_count": dispatch_count,
+        "dispatch_attempt_reserved": dispatch_attempt_reserved,
         "poll_allowed": poll_allowed,
         "duplicate_execution_allowed": False,
         "late_completion_disposition": late_completion_disposition,
@@ -740,6 +742,66 @@ def test_dispatched_unknown_outcomes_remain_owned_and_poll_without_redispatch(
         jobs.mark_dispatched(job["job_id"])
 
 
+def test_crash_after_sdk_entry_remains_durable_dispatch_uncertain_and_cannot_retry():
+    request = _request()
+    confirmation_store = FakeTrustedConfirmationStore()
+    confirmation_store.issue(request, authenticated=True)
+    durable_store = FakeDurableJobStore()
+    sdk = FakeOfficialSdkBoundary(crash_after_dispatch=True)
+    jobs = FakeAsyncRestoreJobRegistry(durable_store)
+    workflow = FakeAsyncRestoreWorkflow(
+        confirmation_store,
+        sdk,
+        FakeGuardedTargetBoundary(),
+        jobs,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated crash after SDK dispatch entry"):
+        workflow.start(request, "request_timeout")
+
+    job_id = next(iter(durable_store.records))
+    restarted = FakeAsyncRestoreJobRegistry(durable_store)
+    descriptor = restarted.descriptor(job_id)
+    assert sdk.dispatch_count == 1
+    assert descriptor["status"] == "dispatch_uncertain"
+    assert descriptor["dispatch_attempt_reserved"] is True
+    assert descriptor["dispatch_count"] == 0
+    assert descriptor["poll_allowed"] is True
+    assert descriptor["handle_retention_owner"] == ("trusted_adapter_local_restore_job_registry")
+    assert descriptor["terminal_source"] is None
+    assert descriptor["duplicate_execution_allowed"] is False
+    with pytest.raises(RuntimeError, match="duplicate restore dispatch forbidden"):
+        restarted.reserve_dispatch(job_id)
+    cancellation = restarted.request_cancellation(job_id)
+    assert cancellation["effective"] is False
+    assert restarted.descriptor(job_id)["status"] == "dispatch_uncertain"
+
+
+def test_dispatch_uncertain_can_only_complete_by_exact_readback_without_redispatch():
+    request = _request()
+    confirmation_store = FakeTrustedConfirmationStore()
+    confirmation_store.issue(request, authenticated=True)
+    sdk = FakeOfficialSdkBoundary(crash_after_dispatch=True)
+    jobs = FakeAsyncRestoreJobRegistry()
+    workflow = FakeAsyncRestoreWorkflow(
+        confirmation_store,
+        sdk,
+        FakeGuardedTargetBoundary(),
+        jobs,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated crash after SDK dispatch entry"):
+        workflow.start(request, "request_timeout")
+    job_id = next(iter(jobs.store.records))
+
+    result = workflow.poll(job_id, late_success=True)
+
+    _validate_result(result)
+    assert result["context"]["state"] == "succeeded"
+    assert result["context"]["job"]["dispatch_count"] == 1
+    assert sdk.dispatch_count == sdk.readback_count == 1
+
+
 def test_late_success_uses_exact_job_readback_terminal_source_and_releases_handles():
     request = _request()
     store = FakeTrustedConfirmationStore()
@@ -764,6 +826,10 @@ def test_late_success_uses_exact_job_readback_terminal_source_and_releases_handl
     assert terminal_job["poll_allowed"] is False
     assert terminal_job["late_completion_disposition"] == ("terminalized_by_official_sdk_readback")
     assert (
+        jobs.tombstone(original_job["job_id"])["completion_receipt_sha256"]
+        == (_completion_receipt_binding(sdk.after_receipt)[1])
+    )
+    assert (
         store.consume_count == sdk.dispatch_count == sdk.readback_count == guard.release_count == 1
     )
 
@@ -777,6 +843,69 @@ def test_late_success_uses_exact_job_readback_terminal_source_and_releases_handl
     missing_terminal_source["context"]["job"]["terminal_source"] = None
     with pytest.raises(ValidationError):
         _validate_result(missing_terminal_source)
+
+
+def test_late_readback_with_a_wrong_canonical_digest_terminalizes_unknown_not_success():
+    bad_readback = _scene_receipt("marked_take.vdf", "d" * 64, "a" * 64)
+    bad_readback["scene_identity_sha256"] = "f" * 64
+    sdk = FakeOfficialSdkBoundary()
+    sdk.after_receipt = bad_readback
+    workflow, jobs, _, job_id = _pending_async_workflow(sdk=sdk)
+
+    result = workflow.poll(job_id, late_success=True)
+
+    assert result["context"]["state"] == "failed_unknown"
+    assert result["success"] is False
+    assert result["context"]["job"]["terminal_source"] == "official_sdk_failure"
+    assert (
+        jobs.tombstone(job_id)["terminal_event_id"] == result["context"]["job"]["terminal_event_id"]
+    )
+
+
+def test_late_readback_digest_must_equal_the_exact_completion_event_receipt():
+    resolver = _resolver()
+    event_receipt = _approved_after_receipt(_request(), resolver)
+    different_readback = json.loads(json.dumps(event_receipt))
+    different_readback["sha256"] = "d" * 64
+    sdk = FakeOfficialSdkBoundary(
+        after_receipt=different_readback,
+        completion_event_receipt=event_receipt,
+    )
+    workflow, _, _, job_id = _pending_async_workflow(sdk=sdk)
+
+    result = workflow.poll(job_id, late_success=True)
+
+    assert result["context"]["state"] == "failed_unknown"
+    assert result["context"]["job"]["terminal_source"] == "official_sdk_failure"
+
+
+def test_malformed_completion_receipt_with_extra_sdk_data_fails_unknown():
+    malformed = _approved_after_receipt(_request(), _resolver())
+    malformed["sdk_internal_text"] = "must-not-authorize-success"
+    sdk = FakeOfficialSdkBoundary(
+        after_receipt=malformed,
+        completion_event_receipt=malformed,
+    )
+    workflow, _, _, job_id = _pending_async_workflow(sdk=sdk)
+
+    result = workflow.poll(job_id, late_success=True)
+
+    _validate_result(result)
+    assert result["context"]["state"] == "failed_unknown"
+    assert result["context"]["job"]["terminal_source"] == "official_sdk_failure"
+
+
+def test_late_readback_equal_to_before_terminalizes_failed_unchanged():
+    before_receipt = _scene_receipt("working_scene.vdf", "b" * 64, "c" * 64)
+    sdk = FakeOfficialSdkBoundary(after_receipt=before_receipt)
+    workflow, _, _, job_id = _pending_async_workflow(sdk=sdk)
+
+    result = workflow.poll(job_id, late_success=True)
+
+    _validate_result(result)
+    assert result["context"]["state"] == "failed_unchanged"
+    assert result["context"]["effect"] == "unchanged"
+    assert result["context"]["before_receipt"] == result["context"]["after_receipt"]
 
 
 def test_operation_binding_changes_with_the_request_and_unknown_job_ids_fail_closed():
@@ -819,7 +948,7 @@ def test_fresh_registry_generation_cannot_reuse_a_previous_job_identity():
 
 def test_late_completion_event_is_bound_to_exact_job_generation_and_operation():
     workflow, jobs, sdk, job_id = _pending_async_workflow()
-    event = jobs.make_completion_event(job_id)
+    event = jobs.make_completion_event(job_id, sdk.completion_receipt())
     forged = dict(event, operation_binding_sha256="f" * 64)
 
     with pytest.raises(RuntimeError, match="completion event identity rejected"):
@@ -869,7 +998,7 @@ def test_duplicate_concurrent_late_completion_reads_back_and_terminalizes_once()
 def test_out_of_order_completion_event_is_rejected_without_state_change():
     _, jobs, sdk, job_id = _pending_async_workflow()
     before = jobs.descriptor(job_id)
-    event = jobs.make_completion_event(job_id)
+    event = jobs.make_completion_event(job_id, sdk.completion_receipt())
     event["event_sequence"] += 1
     event["event_digest_sha256"] = jobs.digest_completion_event(event)
 
@@ -915,7 +1044,7 @@ def test_undispatched_terminal_record_rejects_every_late_transition_entrypoint()
             {"held": True},
         )
     with pytest.raises(RuntimeError, match="terminal record is immutable"):
-        jobs.make_completion_event(terminal["job_id"])
+        jobs.make_completion_event(terminal["job_id"], {})
     assert jobs.descriptor(terminal["job_id"]) == terminal
 
 
@@ -958,11 +1087,11 @@ def test_cancel_and_completion_race_is_monotonic_and_never_redispatches():
     }
 
 
-def _pending_async_workflow(durable_store=None):
+def _pending_async_workflow(durable_store=None, *, sdk=None):
     request = _request()
     confirmation_store = FakeTrustedConfirmationStore()
     confirmation_store.issue(request, authenticated=True)
-    sdk = FakeOfficialSdkBoundary()
+    sdk = sdk or FakeOfficialSdkBoundary()
     jobs = FakeAsyncRestoreJobRegistry(durable_store)
     workflow = FakeAsyncRestoreWorkflow(
         confirmation_store,
@@ -1072,6 +1201,39 @@ def _receipt_binding(receipt):
     return canonical_bytes, hashlib.sha256(canonical_bytes).hexdigest()
 
 
+def _completion_receipt_binding(
+    receipt,
+    *,
+    max_bytes=65_536,
+    chunk_size=4_096,
+    on_chunk=None,
+):
+    if max_bytes < 1 or chunk_size < 1:
+        raise ValueError("completion receipt resource limits must be positive")
+    payload = {
+        "receipt_version": "guarded-official-sdk-completion-v1",
+        "receipt": _normalize_receipt_strings(receipt),
+    }
+    encoder = json.JSONEncoder(
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    digest = hashlib.sha256()
+    total = 0
+    for text_chunk in encoder.iterencode(payload):
+        encoded = text_chunk.encode("utf-8")
+        for offset in range(0, len(encoded), chunk_size):
+            bounded_chunk = encoded[offset : offset + chunk_size]
+            if total + len(bounded_chunk) > max_bytes:
+                raise ValueError("completion receipt exceeds approved resource limit")
+            digest.update(bounded_chunk)
+            total += len(bounded_chunk)
+            if on_chunk is not None:
+                on_chunk(len(bounded_chunk))
+    return total, digest.hexdigest()
+
+
 def _scene_identity_binding(observation):
     canonical_bytes = json.dumps(
         _normalize_receipt_strings(observation),
@@ -1177,21 +1339,74 @@ def _resolver():
     return resolver
 
 
+def _trusted_target_binding(request, resolver):
+    target = resolver.resolve(request["file_path"])
+    receipt = request["recovery_receipt"]
+    _, receipt_digest = _receipt_binding(receipt)
+    return {
+        "canonical_path_sha256": target["sha256"],
+        "target_volume_serial": target["volume_serial"],
+        "target_file_id": target["file_id"],
+        "file_name": receipt["file_name"],
+        "file_size_bytes": receipt["file_size_bytes"],
+        "sha256": receipt["sha256"],
+        "recovery_receipt_binding_sha256": receipt_digest,
+    }
+
+
+def _approved_after_receipt(request, resolver):
+    target = resolver.resolve(request["file_path"])
+    recovery_receipt = request["recovery_receipt"]
+    receipt = _scene_receipt(
+        recovery_receipt["file_name"],
+        target["sha256"],
+        recovery_receipt["sha256"],
+    )
+    receipt["file_size_bytes"] = recovery_receipt["file_size_bytes"]
+    receipt["target_identity"] = {
+        "canonical_path_sha256": target["sha256"],
+        "volume_serial": target["volume_serial"],
+        "file_id": target["file_id"],
+    }
+    return receipt
+
+
+class FakeTrustedClock:
+    def __init__(self, now=NOW_EPOCH_SECONDS):
+        self._now = now
+
+    def now(self):
+        return self._now
+
+    def advance(self, seconds):
+        self._now += seconds
+
+
 class FakeTrustedConfirmationStore:
-    def __init__(self, resolver=None):
+    def __init__(
+        self,
+        resolver=None,
+        *,
+        authority_generation="0000000000000001",
+        trusted_clock=None,
+    ):
         self.resolver = resolver or _resolver()
+        self.authority_generation = authority_generation
+        self.trusted_clock = trusted_clock or FakeTrustedClock()
         self._records = {}
         self._lock = Lock()
         self.consume_count = 0
 
-    def issue(self, request, *, authenticated, now=NOW_EPOCH_SECONDS):
+    def issue(self, request, *, authenticated, now=None):
         if not authenticated:
             raise PermissionError("authenticated operator issuance required")
+        now = self.trusted_clock.now() if now is None else now
         root = self.resolver.resolve(request["trusted_root"])
         target = self.resolver.resolve(request["file_path"])
         _, receipt_digest = _receipt_binding(request["recovery_receipt"])
         record = {
             "record_version": "1.1",
+            "authority_generation": self.authority_generation,
             "confirmation_id": request["operator_confirmation"]["confirmation_id"],
             "request_id": request["request_id"],
             "canonical_trusted_root_sha256": root["sha256"],
@@ -1215,15 +1430,11 @@ class FakeTrustedConfirmationStore:
             self._records[record["confirmation_id"]] = record
         return record["confirmation_id"]
 
-    def trusted_lookup_and_compare(self, request, *, now=NOW_EPOCH_SECONDS):
-        confirmation_id = request["operator_confirmation"]["confirmation_id"]
-        record = self._records.get(confirmation_id)
-        if record is None:
-            return None
+    def _binding_for_request(self, request):
         root = self.resolver.resolve(request["trusted_root"])
         target = self.resolver.resolve(request["file_path"])
         _, receipt_digest = _receipt_binding(request["recovery_receipt"])
-        expected = {
+        return {
             "request_id": request["request_id"],
             "canonical_trusted_root_sha256": root["sha256"],
             "canonical_path_sha256": target["sha256"],
@@ -1231,6 +1442,14 @@ class FakeTrustedConfirmationStore:
             "target_file_id": target["file_id"],
             "recovery_receipt_binding_sha256": receipt_digest,
         }
+
+    def trusted_lookup_and_compare(self, request):
+        now = self.trusted_clock.now()
+        confirmation_id = request["operator_confirmation"]["confirmation_id"]
+        record = self._records.get(confirmation_id)
+        if record is None:
+            return None
+        expected = self._binding_for_request(request)
         matches = all(record[field] == value for field, value in expected.items())
         fresh = record["issued_at_epoch_seconds"] <= now < record["expires_at_epoch_seconds"]
         ttl = record["expires_at_epoch_seconds"] - record["issued_at_epoch_seconds"] <= 300
@@ -1238,6 +1457,7 @@ class FakeTrustedConfirmationStore:
             return None
         return {
             "confirmation_id": confirmation_id,
+            "authority_generation": record["authority_generation"],
             "revision": record["revision"],
             "approved_target_identity": {
                 "canonical_path_sha256": record["canonical_path_sha256"],
@@ -1246,10 +1466,38 @@ class FakeTrustedConfirmationStore:
             },
         }
 
-    def cas_consume(self, ticket):
+    def cas_consume(
+        self,
+        ticket,
+        request,
+        *,
+        guarded_target_binding,
+    ):
         with self._lock:
+            now = self.trusted_clock.now()
             record = self._records[ticket["confirmation_id"]]
-            if record["consumed"] or record["revision"] != ticket["revision"]:
+            expected = self._binding_for_request(request)
+            fresh = record["issued_at_epoch_seconds"] <= now < record["expires_at_epoch_seconds"]
+            ttl = record["expires_at_epoch_seconds"] - record["issued_at_epoch_seconds"] <= 300
+            binding_matches = all(record[field] == value for field, value in expected.items())
+            ticket_matches = (
+                record["authority_generation"] == ticket.get("authority_generation")
+                and record["revision"] == ticket["revision"]
+            )
+            trusted_target_matches = guarded_target_binding == _trusted_target_binding(
+                request,
+                self.resolver,
+            )
+            if not (
+                ticket_matches
+                and binding_matches
+                and trusted_target_matches
+                and fresh
+                and ttl
+                and record["destructive_acknowledged"]
+                and record["non_idempotent_acknowledged"]
+                and not record["consumed"]
+            ):
                 return False
             record["consumed"] = True
             record["revision"] += 1
@@ -1258,12 +1506,21 @@ class FakeTrustedConfirmationStore:
 
 
 class FakeOfficialSdkBoundary:
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        crash_after_dispatch=False,
+        after_receipt=None,
+        completion_event_receipt=None,
+    ):
         self._lock = Lock()
+        self.crash_after_dispatch = crash_after_dispatch
         self.before_capture_count = 0
         self.dispatch_count = 0
         self.readback_count = 0
         self.dispatch_evidence = []
+        self.after_receipt = after_receipt or _approved_after_receipt(_request(), _resolver())
+        self.completion_event_receipt = completion_event_receipt or self.after_receipt
 
     def capture_before(self):
         with self._lock:
@@ -1275,10 +1532,16 @@ class FakeOfficialSdkBoundary:
         with self._lock:
             self.dispatch_count += 1
             self.dispatch_evidence.append(dict(dispatch_capability))
+        if self.crash_after_dispatch:
+            raise RuntimeError("simulated crash after SDK dispatch entry")
 
     def readback_after(self):
         with self._lock:
             self.readback_count += 1
+        return json.loads(json.dumps(self.after_receipt))
+
+    def completion_receipt(self):
+        return json.loads(json.dumps(self.completion_event_receipt))
 
 
 class FakeGuardedTargetBoundary:
@@ -1373,6 +1636,13 @@ class FakeGuardedTargetBoundary:
             "held": token["held"],
         }
 
+    def cas_binding(self, token, request, resolver):
+        assert token["held"] is True
+        binding = _trusted_target_binding(request, resolver)
+        target = self.current_namespace_identity["target_file"]
+        binding["sha256"] = target["content_sha256"]
+        return binding
+
     def conflicting_replace_allowed(self):
         with self._lock:
             return self._active_count == 0
@@ -1418,7 +1688,15 @@ class FakeRestoreWorkflow:
                 result = _result("target_guard_rejected")
                 result["context"]["before_receipt"] = before_receipt
                 return result
-            if not self.store.cas_consume(ticket):
+            if not self.store.cas_consume(
+                ticket,
+                request,
+                guarded_target_binding=self.guard.cas_binding(
+                    guard_token,
+                    request,
+                    self.store.resolver,
+                ),
+            ):
                 result = _result("confirmation_consume_rejected")
                 result["context"]["before_receipt"] = before_receipt
                 return result
@@ -1472,7 +1750,16 @@ class FakeDurableJobStore:
 
 
 class FakeAsyncRestoreJobRegistry:
-    _INTERNAL_FIELDS = {"guard", "guard_token", "completion_event"}
+    _INTERNAL_FIELDS = {
+        "guard",
+        "guard_token",
+        "completion_event",
+        "operation_binding",
+        "approved_recovery_receipt",
+        "approved_target_identity",
+        "before_receipt",
+        "terminal_outcome",
+    }
 
     def __init__(self, durable_store=None):
         self.store = durable_store or FakeDurableJobStore()
@@ -1486,6 +1773,7 @@ class FakeAsyncRestoreJobRegistry:
         target = resolver.resolve(request["file_path"])
         _, receipt_digest = _receipt_binding(request["recovery_receipt"])
         binding = {
+            "job_generation": self.generation,
             "request_id": request["request_id"],
             "confirmation_id": ticket["confirmation_id"],
             "confirmation_revision": ticket["revision"],
@@ -1519,6 +1807,7 @@ class FakeAsyncRestoreJobRegistry:
                 "cancellation_disposition": "not_requested",
                 "handle_retention_owner": "released_before_dispatch",
                 "dispatch_count": 0,
+                "dispatch_attempt_reserved": False,
                 "poll_allowed": False,
                 "duplicate_execution_allowed": False,
                 "late_completion_disposition": "not_applicable",
@@ -1529,6 +1818,11 @@ class FakeAsyncRestoreJobRegistry:
                 "cancellation_effective": False,
                 "terminal_event_id": None,
                 "terminal_event_digest_sha256": None,
+                "operation_binding": dict(binding),
+                "approved_recovery_receipt": json.loads(json.dumps(request["recovery_receipt"])),
+                "approved_target_identity": dict(ticket["approved_target_identity"]),
+                "before_receipt": None,
+                "terminal_outcome": None,
                 "guard": None,
                 "guard_token": None,
                 "completion_event": None,
@@ -1549,7 +1843,13 @@ class FakeAsyncRestoreJobRegistry:
         return hashlib.sha256(canonical).hexdigest()
 
     @classmethod
-    def _completion_event_for_record(cls, record):
+    def _completion_event_for_digest(cls, record, completion_receipt_sha256):
+        if not (
+            isinstance(completion_receipt_sha256, str)
+            and len(completion_receipt_sha256) == 64
+            and all(character in "0123456789abcdef" for character in completion_receipt_sha256)
+        ):
+            raise RuntimeError("completion event identity rejected")
         identity = {
             "job_id": record["job_id"],
             "job_generation": record["job_generation"],
@@ -1557,12 +1857,17 @@ class FakeAsyncRestoreJobRegistry:
             "expected_revision": record["record_revision"],
             "event_sequence": record["event_sequence"] + 1,
             "terminal_source": "official_sdk_readback",
-            "completion_receipt_sha256": "1" * 64,
+            "completion_receipt_sha256": completion_receipt_sha256,
         }
         canonical = json.dumps(identity, separators=(",", ":"), sort_keys=True).encode()
         event = {"event_id": "rce1-" + hashlib.sha256(canonical).hexdigest(), **identity}
         event["event_digest_sha256"] = cls.digest_completion_event(event)
         return event
+
+    @classmethod
+    def _completion_event_for_record(cls, record, completion_receipt):
+        _, completion_receipt_sha256 = _completion_receipt_binding(completion_receipt)
+        return cls._completion_event_for_digest(record, completion_receipt_sha256)
 
     @staticmethod
     def _terminal_event(record, source):
@@ -1580,6 +1885,7 @@ class FakeAsyncRestoreJobRegistry:
         return event_id, digest
 
     def _write_tombstone(self, record):
+        completion_event = record["completion_event"]
         self.store.tombstones[record["job_id"]] = {
             "job_id": record["job_id"],
             "job_generation": record["job_generation"],
@@ -1587,6 +1893,11 @@ class FakeAsyncRestoreJobRegistry:
             "terminal_revision": record["record_revision"],
             "terminal_event_id": record["terminal_event_id"],
             "terminal_event_digest_sha256": record["terminal_event_digest_sha256"],
+            "completion_receipt_sha256": (
+                completion_event["completion_receipt_sha256"]
+                if completion_event is not None
+                else None
+            ),
         }
 
     def retain_handles(self, job_id, guard, guard_token):
@@ -1596,9 +1907,22 @@ class FakeAsyncRestoreJobRegistry:
                 raise RuntimeError("terminal record is immutable")
             if record["dispatch_count"] != 0:
                 raise RuntimeError("handles may only transfer before dispatch")
-            record["guard"] = guard
-            record["guard_token"] = guard_token
-            record["handle_retention_owner"] = "trusted_adapter_local_restore_job_registry"
+            self._advance(
+                record,
+                guard=guard,
+                guard_token=guard_token,
+                handle_retention_owner="trusted_adapter_local_restore_job_registry",
+            )
+
+    def record_before_receipt(self, job_id, before_receipt):
+        with self.store.condition:
+            record = self._records[job_id]
+            if record["status"] != "created" or record["before_receipt"] is not None:
+                raise RuntimeError("before receipt transition rejected")
+            self._advance(
+                record,
+                before_receipt=json.loads(json.dumps(before_receipt)),
+            )
 
     def cancel_before_dispatch(self, job_id):
         return self.request_cancellation(job_id)
@@ -1606,12 +1930,28 @@ class FakeAsyncRestoreJobRegistry:
     def mark_dispatched(self, job_id):
         with self.store.condition:
             record = self._records[job_id]
-            if record["dispatch_count"]:
+            if record["dispatch_count"] or not record["dispatch_attempt_reserved"]:
                 raise RuntimeError("duplicate restore dispatch forbidden")
             self._advance(
                 record,
                 dispatch_count=1,
                 status="awaiting_late_readback",
+                poll_allowed=True,
+                late_completion_disposition="poll_exact_job_without_redispatch",
+            )
+
+    def reserve_dispatch(self, job_id):
+        with self.store.condition:
+            record = self._records[job_id]
+            if record["dispatch_attempt_reserved"] or record["dispatch_count"]:
+                raise RuntimeError("duplicate restore dispatch forbidden")
+            if record["status"] != "created" or record["guard"] is None:
+                raise RuntimeError("dispatch reservation precondition rejected")
+            self._advance(
+                record,
+                status="dispatch_uncertain",
+                snapshot_source="durable_dispatch_reservation",
+                dispatch_attempt_reserved=True,
                 poll_allowed=True,
                 late_completion_disposition="poll_exact_job_without_redispatch",
             )
@@ -1636,6 +1976,20 @@ class FakeAsyncRestoreJobRegistry:
                     "requested": True,
                     "effective": False,
                     "disposition": "ignored_after_terminal",
+                }
+            if record["dispatch_attempt_reserved"]:
+                if not record["cancellation_requested"]:
+                    self._advance(
+                        record,
+                        snapshot_source="cancellation_after_dispatch",
+                        cancellation_disposition=("requested_after_dispatch_operation_continues"),
+                        cancellation_requested=True,
+                        cancellation_effective=False,
+                    )
+                return {
+                    "requested": True,
+                    "effective": False,
+                    "disposition": "requested_after_dispatch_operation_continues",
                 }
             if record["dispatch_count"] == 0:
                 guard = record["guard"]
@@ -1681,13 +2035,16 @@ class FakeAsyncRestoreJobRegistry:
                 "disposition": "requested_after_dispatch_operation_continues",
             }
 
-    def make_completion_event(self, job_id):
+    def make_completion_event(self, job_id, completion_receipt):
         with self.store.condition:
             record = self._records[job_id]
             if record["status"] == "terminal_not_dispatched":
                 raise RuntimeError("terminal record is immutable")
             if record["completion_event"] is None:
-                record["completion_event"] = self._completion_event_for_record(record)
+                record["completion_event"] = self._completion_event_for_record(
+                    record,
+                    completion_receipt,
+                )
             return dict(record["completion_event"])
 
     def claim_late_readback(self, event):
@@ -1707,12 +2064,15 @@ class FakeAsyncRestoreJobRegistry:
                 raise RuntimeError("completion event sequence rejected")
             if event.get("expected_revision") != record["record_revision"]:
                 raise RuntimeError("completion event revision rejected")
-            expected = self._completion_event_for_record(record)
+            expected = self._completion_event_for_digest(
+                record,
+                event.get("completion_receipt_sha256"),
+            )
             if event != expected or event.get(
                 "event_digest_sha256"
             ) != self.digest_completion_event(event):
                 raise RuntimeError("completion event identity rejected")
-            if record["status"] != "awaiting_late_readback":
+            if record["status"] not in {"dispatch_uncertain", "awaiting_late_readback"}:
                 raise RuntimeError("completion event state rejected")
             record["completion_event"] = dict(event)
             self._advance(
@@ -1726,7 +2086,84 @@ class FakeAsyncRestoreJobRegistry:
                 "operation_binding_sha256": record["operation_binding_sha256"],
             }
 
-    def complete_late_success(self, claim):
+    @staticmethod
+    def _receipt_is_canonical(receipt):
+        try:
+            required_fields = {
+                "active_scene_observed_via",
+                "file_evidence_observed_via",
+                "file_name",
+                "file_size_bytes",
+                "sha256",
+                "scene_identity_fields",
+                "scene_identity_sha256",
+            }
+            if frozenset(receipt) not in {
+                frozenset(required_fields),
+                frozenset(required_fields | {"target_identity"}),
+            }:
+                return False
+            identity_fields = receipt["scene_identity_fields"]
+            if set(identity_fields) != {
+                "canonical_path_sha256",
+                "frame_count",
+                "scene_name",
+            }:
+                return False
+            _, identity_digest = _scene_identity_binding(identity_fields)
+            valid = (
+                receipt["active_scene_observed_via"] == "official_sdk"
+                and receipt["file_evidence_observed_via"] == "filesystem"
+                and receipt["scene_identity_sha256"] == identity_digest
+                and identity_fields["scene_name"] == receipt["file_name"]
+                and isinstance(receipt["file_name"], str)
+                and 0 < len(receipt["file_name"]) <= 255
+                and not {"/", "\\"}.intersection(receipt["file_name"])
+                and type(receipt["file_size_bytes"]) is int
+                and 0 < receipt["file_size_bytes"] <= 8_589_934_592
+                and isinstance(receipt["sha256"], str)
+                and len(receipt["sha256"]) == 64
+                and all(character in "0123456789abcdef" for character in receipt["sha256"])
+                and isinstance(identity_fields["canonical_path_sha256"], str)
+                and len(identity_fields["canonical_path_sha256"]) == 64
+                and type(identity_fields["frame_count"]) is int
+                and identity_fields["frame_count"] >= 0
+            )
+            target_identity = receipt.get("target_identity")
+            if target_identity is not None:
+                valid = valid and set(target_identity) == {
+                    "canonical_path_sha256",
+                    "volume_serial",
+                    "file_id",
+                }
+            return valid
+        except (KeyError, TypeError):
+            return False
+
+    def _classify_completion(self, record, actual_receipt):
+        if not self._receipt_is_canonical(actual_receipt):
+            return "failed_unknown"
+        before_receipt = record["before_receipt"]
+        if actual_receipt == before_receipt:
+            return "failed_unchanged"
+        approved_receipt = record["approved_recovery_receipt"]
+        approved_target = record["approved_target_identity"]
+        expected_target_members = {
+            "file_name": approved_receipt["file_name"],
+            "file_size_bytes": approved_receipt["file_size_bytes"],
+            "sha256": approved_receipt["sha256"],
+            "target_identity": approved_target,
+        }
+        observed_target_members = {key: actual_receipt.get(key) for key in expected_target_members}
+        scene_path_matches = (
+            actual_receipt["scene_identity_fields"].get("canonical_path_sha256")
+            == approved_target["canonical_path_sha256"]
+        )
+        if observed_target_members == expected_target_members and scene_path_matches:
+            return "succeeded"
+        return "failed_unknown"
+
+    def complete_guarded_readback(self, claim, actual_receipt):
         with self.store.condition:
             record = self._records[claim["job_id"]]
             event = record["completion_event"]
@@ -1740,23 +2177,57 @@ class FakeAsyncRestoreJobRegistry:
             guard_token = record["guard_token"]
             if guard is None or guard_token is None:
                 raise RuntimeError("late completion handle ownership rejected")
+            _, actual_receipt_digest = _completion_receipt_binding(actual_receipt)
+            outcome = self._classify_completion(record, actual_receipt)
+            if actual_receipt_digest != event["completion_receipt_sha256"]:
+                outcome = "failed_unknown"
             guard.release(guard_token)
+            succeeded_or_unchanged = outcome in {"succeeded", "failed_unchanged"}
             self._advance(
                 record,
                 advance_event=False,
                 status="terminal",
-                snapshot_source="late_official_sdk_readback",
-                terminal_source="official_sdk_readback",
-                handle_retention_owner="released_after_terminal_readback",
+                snapshot_source=(
+                    "late_official_sdk_readback"
+                    if succeeded_or_unchanged
+                    else "official_sdk_failure"
+                ),
+                terminal_source=(
+                    "official_sdk_readback" if succeeded_or_unchanged else "official_sdk_failure"
+                ),
+                handle_retention_owner=(
+                    "released_after_terminal_readback"
+                    if succeeded_or_unchanged
+                    else "released_after_terminal_unknown"
+                ),
                 poll_allowed=False,
-                late_completion_disposition="terminalized_by_official_sdk_readback",
+                late_completion_disposition=(
+                    "terminalized_by_official_sdk_readback"
+                    if succeeded_or_unchanged
+                    else "not_applicable"
+                ),
                 terminal_event_id=event["event_id"],
                 terminal_event_digest_sha256=event["event_digest_sha256"],
+                dispatch_count=1,
+                terminal_outcome=outcome,
                 guard=None,
                 guard_token=None,
             )
             self._write_tombstone(record)
             self.store.condition.notify_all()
+            return outcome
+
+    def audit_context(self, job_id):
+        with self.store.condition:
+            record = self._records[job_id]
+            return {
+                "before_receipt": json.loads(json.dumps(record["before_receipt"])),
+                "approved_recovery_receipt": json.loads(
+                    json.dumps(record["approved_recovery_receipt"])
+                ),
+                "approved_target_identity": dict(record["approved_target_identity"]),
+                "terminal_outcome": record["terminal_outcome"],
+            }
 
     def descriptor(self, job_id):
         with self.store.condition:
@@ -1813,7 +2284,17 @@ class FakeAsyncRestoreWorkflow:
         before_receipt = self.sdk.capture_before()
         self.guard.recapture(guard_token)
         self.jobs.retain_handles(job_id, self.guard, guard_token)
-        assert self.store.cas_consume(ticket)
+        self.jobs.record_before_receipt(job_id, before_receipt)
+        assert self.store.cas_consume(
+            ticket,
+            request,
+            guarded_target_binding=self.guard.cas_binding(
+                guard_token,
+                request,
+                self.store.resolver,
+            ),
+        )
+        self.jobs.reserve_dispatch(job_id)
         self.sdk.dispatch_restore(self.guard.dispatch_capability(guard_token))
         self.jobs.mark_dispatched(job_id)
         self.jobs.snapshot_unknown(job_id, outcome)
@@ -1825,9 +2306,15 @@ class FakeAsyncRestoreWorkflow:
 
     def poll(self, job_id, *, late_success=False):
         descriptor = self.jobs.poll(job_id)
-        if late_success and descriptor["status"] == "awaiting_late_readback":
+        if late_success and descriptor["status"] in {
+            "dispatch_uncertain",
+            "awaiting_late_readback",
+        }:
             for attempt in range(2):
-                event = self.jobs.make_completion_event(job_id)
+                event = self.jobs.make_completion_event(
+                    job_id,
+                    self.sdk.completion_receipt(),
+                )
                 try:
                     claim = self.jobs.claim_late_readback(event)
                     break
@@ -1840,13 +2327,22 @@ class FakeAsyncRestoreWorkflow:
                         self.jobs._records[job_id]["completion_event"] = None
             if claim is None:
                 terminal = self.jobs.descriptor(job_id)
-                result = _result("succeeded")
+                audit = self.jobs.audit_context(job_id)
+                result = _result(audit["terminal_outcome"])
                 result["context"]["job"] = terminal
                 return result
-            self.sdk.readback_after()
-            self.jobs.complete_late_success(claim)
-            result = _result("succeeded")
+            actual_receipt = self.sdk.readback_after()
+            outcome = self.jobs.complete_guarded_readback(claim, actual_receipt)
+            audit = self.jobs.audit_context(job_id)
+            result = _result(outcome)
             result["context"]["job"] = self.jobs.descriptor(job_id)
+            result["context"]["before_receipt"] = audit["before_receipt"]
+            if outcome == "succeeded":
+                result["context"]["approved_recovery_receipt"] = audit["approved_recovery_receipt"]
+                result["context"]["approved_target_identity"] = audit["approved_target_identity"]
+                result["context"]["after_receipt"] = actual_receipt
+            elif outcome == "failed_unchanged":
+                result["context"]["after_receipt"] = actual_receipt
             return result
         return descriptor
 
@@ -1854,7 +2350,7 @@ class FakeAsyncRestoreWorkflow:
 def test_restore_contract_is_design_only_and_fail_closed():
     contract = _contract()
 
-    assert contract["contract_version"] == "1.6"
+    assert contract["contract_version"] == "1.7"
     assert contract["status"] == "proposed-design-only"
     assert contract["implementation_authorized"] is False
     assert contract["operation"] == {
@@ -1918,6 +2414,44 @@ def test_restore_request_binds_the_complete_prior_recovery_receipt():
         invalid_receipt[field] = value
         with pytest.raises(ValidationError):
             validator.validate(_request(recovery_receipt=invalid_receipt))
+
+
+def test_restore_request_rejects_one_byte_over_the_approved_resource_ceiling():
+    limit = _contract()["resource_limits"]["approved_file_size_max_bytes"]
+    validator = _validator("input_schema")
+    at_limit = dict(_request()["recovery_receipt"], file_size_bytes=limit)
+    over_limit = dict(_request()["recovery_receipt"], file_size_bytes=limit + 1)
+
+    validator.validate(_request(recovery_receipt=at_limit))
+    with pytest.raises(ValidationError):
+        validator.validate(_request(recovery_receipt=over_limit))
+
+    assert _contract()["resource_limits"] == {
+        "approved_file_size_max_bytes": 8_589_934_592,
+        "filesystem_hash_chunk_size_bytes": 65_536,
+        "sdk_readback_receipt_max_bytes": 65_536,
+        "size_source": "guarded_target_handle",
+        "oversize_disposition": "reject_before_hashing_or_buffering",
+        "file_hashing": "streaming_sha256_exact_size",
+        "sdk_readback": "bounded_canonical_receipt_stream",
+    }
+
+
+def test_sdk_completion_receipt_digest_streams_and_rejects_limit_plus_one():
+    receipt = _approved_after_receipt(_request(), _resolver())
+    chunk_sizes = []
+    size, digest = _completion_receipt_binding(
+        receipt,
+        max_bytes=_contract()["resource_limits"]["sdk_readback_receipt_max_bytes"],
+        chunk_size=7,
+        on_chunk=chunk_sizes.append,
+    )
+
+    assert size == sum(chunk_sizes)
+    assert len(chunk_sizes) > 1
+    assert digest == _completion_receipt_binding(receipt)[1]
+    with pytest.raises(ValueError, match="resource limit"):
+        _completion_receipt_binding(receipt, max_bytes=size - 1, chunk_size=7)
 
 
 def test_restore_request_rejects_alternate_data_stream_syntax():
@@ -2093,11 +2627,54 @@ def test_confirmation_rejects_expired_future_and_consumed_records():
     consumed.issue(request, authenticated=True)
     ticket = consumed.trusted_lookup_and_compare(request)
     assert ticket is not None
-    assert consumed.cas_consume(ticket)
+    assert consumed.cas_consume(
+        ticket,
+        request,
+        guarded_target_binding=_trusted_target_binding(request, consumed.resolver),
+    )
 
     assert expired.trusted_lookup_and_compare(request) is None
     assert future.trusted_lookup_and_compare(request) is None
     assert consumed.trusted_lookup_and_compare(request) is None
+
+
+def test_confirmation_expiring_between_lookup_and_consume_is_rejected_atomically():
+    request = _request()
+    trusted_clock = FakeTrustedClock()
+    store = FakeTrustedConfirmationStore(trusted_clock=trusted_clock)
+    store.issue(request, authenticated=True)
+    ticket = store.trusted_lookup_and_compare(request)
+
+    assert ticket is not None
+    trusted_clock.advance(271)
+    assert not store.cas_consume(
+        ticket,
+        request,
+        guarded_target_binding=_trusted_target_binding(request, store.resolver),
+    )
+    assert store.consume_count == 0
+    assert store.trusted_lookup_and_compare(request) is None
+
+
+def test_confirmation_cas_rejects_a_changed_guarded_target_body_binding():
+    request = _request()
+    store = FakeTrustedConfirmationStore()
+    store.issue(request, authenticated=True)
+    ticket = store.trusted_lookup_and_compare(request)
+    guard = FakeGuardedTargetBoundary()
+    guard_token = guard.open()
+    guarded_binding = guard.cas_binding(guard_token, request, store.resolver)
+    guarded_binding["sha256"] = "d" * 64
+
+    try:
+        assert not store.cas_consume(
+            ticket,
+            request,
+            guarded_target_binding=guarded_binding,
+        )
+        assert store.consume_count == 0
+    finally:
+        guard.release(guard_token)
 
 
 def test_caller_owned_confirmation_dict_cannot_authorize():
@@ -2120,7 +2697,11 @@ def test_consumed_confirmation_id_cannot_be_reissued_or_resurrected():
     store.issue(request, authenticated=True)
     ticket = store.trusted_lookup_and_compare(request)
     assert ticket is not None
-    assert store.cas_consume(ticket)
+    assert store.cas_consume(
+        ticket,
+        request,
+        guarded_target_binding=_trusted_target_binding(request, store.resolver),
+    )
 
     with pytest.raises(ValueError, match="confirmation ID is immutable and nonreusable"):
         store.issue(request, authenticated=True)
@@ -2289,7 +2870,18 @@ def test_confirmation_authority_defines_trusted_issuance_lookup_compare_and_cons
         "target_file_id",
         "recovery_receipt_binding_sha256",
     ]
-    assert authority["consume"] == "atomic_compare_and_set_unconsumed_before_dispatch"
+    assert authority["consume"] == (
+        "atomic_compare_and_set_revalidate_time_generation_request_target_and_receipt"
+    )
+    assert authority["consume_revalidation"] == [
+        "trusted_current_time_precedes_expiry",
+        "maximum_ttl_not_exceeded",
+        "authority_generation_and_record_revision_match_lookup_ticket",
+        "all_request_path_and_recovery_receipt_bindings_match",
+        "guarded_target_identity_size_and_streaming_sha256_match",
+        "destructive_and_non_idempotent_acknowledgements_remain_true",
+        "confirmation_remains_unconsumed",
+    ]
     assert authority["state_machine"] == [
         "authenticated_issue_to_trusted_store",
         "trusted_lookup_by_confirmation_id",
@@ -2298,7 +2890,7 @@ def test_confirmation_authority_defines_trusted_issuance_lookup_compare_and_cons
         "connect_host_and_capture_before_receipt",
         "recapture_all_pinned_handle_identities_and_target_receipt",
         "reject_any_guard_change_before_consumption",
-        "atomic_compare_and_set_consume",
+        "atomic_revalidate_all_authority_and_guard_bindings_then_consume",
         "dispatch_volume_guid_path_while_full_chain_remains_pinned",
         "official_sdk_readback_matches_guarded_confirmation_identity",
     ]
@@ -2728,6 +3320,12 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
     assert async_contract["persistence"] == "durable_atomic_store_survives_adapter_restart"
     assert async_contract["create_record"] == "before_host_connection_and_dispatch"
     assert async_contract["result_member"] == "context.job"
+    assert async_contract["status_descriptor_schemas"] == {
+        "private_dispatch_uncertain": (
+            "private_audit_result_schema.$defs.dispatch_uncertain_job_descriptor"
+        ),
+        "public_dispatch_uncertain": "output_schema.$defs.public_dispatch_uncertain_job",
+    }
     assert async_contract["identity"] == {
         "format": "rj1_sha256_generation_sequence_operation_binding_v1",
         "generation": "durable_monotonic_registry_generation",
@@ -2739,6 +3337,7 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
     assert async_contract["exact_operation_binding"] == {
         "algorithm": "nfc_sorted_compact_json_sha256_v1",
         "members": [
+            "job_generation",
             "request_id",
             "confirmation_id",
             "confirmation_revision",
@@ -2753,6 +3352,17 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
     assert async_contract["poll_may_dispatch"] is False
     assert async_contract["retry_may_dispatch"] is False
     assert async_contract["max_dispatch_count_per_job"] == 1
+    assert async_contract["dispatch_boundary"] == {
+        "durable_state_before_sdk_call": "dispatch_uncertain",
+        "reservation_binding": "exact_job_generation_operation_confirmation_target_and_receipt",
+        "sdk_call_attempts_after_reservation": 1,
+        "dispatch_count_semantics": "official_sdk_call_return_confirmed",
+        "crash_after_reservation": "possible_dispatch_unknown",
+        "recovery_redispatch": "forbidden",
+        "terminal_not_dispatched_after_reservation": "forbidden",
+        "handle_owner": "trusted_adapter_local_restore_job_registry",
+        "guarantee_without_sdk_transaction_or_idempotency": "at_most_once_not_exactly_once",
+    }
     assert async_contract["handle_ownership"] == {
         "transfer": ("request_scope_to_trusted_adapter_local_restore_job_registry_before_dispatch"),
         "retain_after_dispatch": ("through_late_official_sdk_readback_or_terminal_unknown_effect"),
@@ -2773,8 +3383,22 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
         ],
         "digest": "sorted_compact_json_sha256",
         "polling": "jobs_get_status_never_redispatches",
-        "success_source": "official_sdk_readback",
-        "result_state": "succeeded",
+        "event_receipt_source": "actual_official_sdk_completion_receipt",
+        "readback_source": "fresh_official_sdk_and_guarded_filesystem_receipt",
+        "verified_bindings": [
+            "job_id",
+            "job_generation",
+            "operation_binding_sha256",
+            "confirmation_and_approved_target",
+            "canonical_scene_identity_sha256",
+            "completion_event_receipt_sha256",
+        ],
+        "terminal_outcomes": {
+            "approved_distinct_readback": "succeeded",
+            "exact_before_readback": "failed_unchanged",
+            "malformed_mismatched_or_unbounded_readback": "failed_unknown",
+        },
+        "receipt_digest_mismatch": "failed_unknown",
         "handles": "released_after_terminal_readback",
     }
     assert async_contract["transitions"] == {
@@ -2788,6 +3412,50 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
         "out_of_order_completion": "reject_without_state_change",
         "stale_snapshot_publication": "reject_against_latest_durable_revision",
     }
+
+
+def test_dispatch_uncertain_has_strict_private_and_public_status_schemas():
+    contract = _contract()
+    private_defs = contract["private_audit_result_schema"]["$defs"]
+    public_defs = contract["output_schema"]["$defs"]
+    private_job = _job_descriptor(
+        status="dispatch_uncertain",
+        snapshot_source="durable_dispatch_reservation",
+        dispatch_count=0,
+    )
+    public_job = _public_job_for_state(
+        "timed_out",
+        private_job,
+        "c" * 64,
+        b"adapter-private-test-key",
+    )
+
+    Draft202012Validator(
+        {
+            "$defs": private_defs,
+            "$ref": "#/$defs/dispatch_uncertain_job_descriptor",
+        }
+    ).validate(private_job)
+    Draft202012Validator(
+        {
+            "$defs": public_defs,
+            "$ref": "#/$defs/public_dispatch_uncertain_job",
+        }
+    ).validate(public_job)
+
+    for invalid in (
+        dict(private_job, dispatch_attempt_reserved=False),
+        dict(private_job, status="terminal_not_dispatched"),
+        dict(private_job, poll_allowed=False),
+        dict(private_job, handle_retention_owner="released_before_dispatch"),
+    ):
+        with pytest.raises(ValidationError):
+            Draft202012Validator(
+                {
+                    "$defs": private_defs,
+                    "$ref": "#/$defs/dispatch_uncertain_job_descriptor",
+                }
+            ).validate(invalid)
 
 
 def test_adr_preserves_the_design_only_acceptance_boundary():
@@ -2820,6 +3488,15 @@ def test_adr_preserves_the_design_only_acceptance_boundary():
         "canonical-path digest",
         "freshness and expiry",
         "atomic compare-and-set",
+        "trusted current time",
+        "dispatch-uncertain",
+        "at-most-once",
+        "SDK transaction or idempotency",
+        "completion-receipt digest",
+        "failed unknown",
+        "8 GiB",
+        "streaming SHA-256",
+        "64 KiB",
         "confirmation_consume_rejected",
         "exactly one winner",
         "handle-derived final path",

@@ -1,4 +1,4 @@
-contract_version: "1.6"
+contract_version: "1.7"
 status: proposed-design-only
 implementation_authorized: false
 
@@ -11,6 +11,15 @@ operation:
   route: official_sdk_only
 
 prohibited_routes: [arbitrary_hsl, python, ui_automation]
+
+resource_limits:
+  approved_file_size_max_bytes: 8589934592
+  filesystem_hash_chunk_size_bytes: 65536
+  sdk_readback_receipt_max_bytes: 65536
+  size_source: guarded_target_handle
+  oversize_disposition: reject_before_hashing_or_buffering
+  file_hashing: streaming_sha256_exact_size
+  sdk_readback: bounded_canonical_receipt_stream
 
 public_output_policy:
   message_source: fixed_state_constants_only
@@ -62,6 +71,9 @@ async_job_contract:
   persistence: durable_atomic_store_survives_adapter_restart
   create_record: before_host_connection_and_dispatch
   result_member: context.job
+  status_descriptor_schemas:
+    private_dispatch_uncertain: private_audit_result_schema.$defs.dispatch_uncertain_job_descriptor
+    public_dispatch_uncertain: output_schema.$defs.public_dispatch_uncertain_job
   identity:
     format: rj1_sha256_generation_sequence_operation_binding_v1
     generation: durable_monotonic_registry_generation
@@ -72,6 +84,7 @@ async_job_contract:
   exact_operation_binding:
     algorithm: nfc_sorted_compact_json_sha256_v1
     members:
+      - job_generation
       - request_id
       - confirmation_id
       - confirmation_revision
@@ -93,6 +106,16 @@ async_job_contract:
   poll_may_dispatch: false
   retry_may_dispatch: false
   max_dispatch_count_per_job: 1
+  dispatch_boundary:
+    durable_state_before_sdk_call: dispatch_uncertain
+    reservation_binding: exact_job_generation_operation_confirmation_target_and_receipt
+    sdk_call_attempts_after_reservation: 1
+    dispatch_count_semantics: official_sdk_call_return_confirmed
+    crash_after_reservation: possible_dispatch_unknown
+    recovery_redispatch: forbidden
+    terminal_not_dispatched_after_reservation: forbidden
+    handle_owner: trusted_adapter_local_restore_job_registry
+    guarantee_without_sdk_transaction_or_idempotency: at_most_once_not_exactly_once
   cancellation:
     fields: [cancellation_requested, cancellation_effective, cancellation_disposition]
     before_dispatch:
@@ -128,8 +151,20 @@ async_job_contract:
       - completion_receipt_sha256
     digest: sorted_compact_json_sha256
     polling: jobs_get_status_never_redispatches
-    success_source: official_sdk_readback
-    result_state: succeeded
+    event_receipt_source: actual_official_sdk_completion_receipt
+    readback_source: fresh_official_sdk_and_guarded_filesystem_receipt
+    verified_bindings:
+      - job_id
+      - job_generation
+      - operation_binding_sha256
+      - confirmation_and_approved_target
+      - canonical_scene_identity_sha256
+      - completion_event_receipt_sha256
+    terminal_outcomes:
+      approved_distinct_readback: succeeded
+      exact_before_readback: failed_unchanged
+      malformed_mismatched_or_unbounded_readback: failed_unknown
+    receipt_digest_mismatch: failed_unknown
     handles: released_after_terminal_readback
   transitions:
     synchronization: durable_store_compare_and_set_lock
@@ -168,7 +203,15 @@ confirmation_authority:
   confirmation_id_reuse: forbidden_forever
   reauthorization_requires: new_confirmation_id
   record_retention: durable_tombstone_after_expiry_or_consumption
-  consume: atomic_compare_and_set_unconsumed_before_dispatch
+  consume: atomic_compare_and_set_revalidate_time_generation_request_target_and_receipt
+  consume_revalidation:
+    - trusted_current_time_precedes_expiry
+    - maximum_ttl_not_exceeded
+    - authority_generation_and_record_revision_match_lookup_ticket
+    - all_request_path_and_recovery_receipt_bindings_match
+    - guarded_target_identity_size_and_streaming_sha256_match
+    - destructive_and_non_idempotent_acknowledgements_remain_true
+    - confirmation_remains_unconsumed
   concurrency_invariant: consume_count_equals_dispatch_count_equals_one
   state_machine:
     - authenticated_issue_to_trusted_store
@@ -178,7 +221,7 @@ confirmation_authority:
     - connect_host_and_capture_before_receipt
     - recapture_all_pinned_handle_identities_and_target_receipt
     - reject_any_guard_change_before_consumption
-    - atomic_compare_and_set_consume
+    - atomic_revalidate_all_authority_and_guard_bindings_then_consume
     - dispatch_volume_guid_path_while_full_chain_remains_pinned
     - official_sdk_readback_matches_guarded_confirmation_identity
   issuance_record_schema:
@@ -186,6 +229,7 @@ confirmation_authority:
     type: object
     required:
       - record_version
+      - authority_generation
       - confirmation_id
       - request_id
       - canonical_trusted_root_sha256
@@ -201,6 +245,7 @@ confirmation_authority:
       - revision
     properties:
       record_version: {type: string, const: "1.1"}
+      authority_generation: {type: string, pattern: "^[0-9a-f]{16}$"}
       confirmation_id:
         type: string
         minLength: 1
@@ -503,7 +548,7 @@ input_schema:
           minLength: 5
           maxLength: 255
           pattern: "^[^/\\\\]+\\.[vV][dD][fF]$"
-        file_size_bytes: {type: integer, minimum: 1}
+        file_size_bytes: {type: integer, minimum: 1, maximum: 8589934592}
         sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
         active_scene_changed: {type: boolean, const: false}
       additionalProperties: false
@@ -543,7 +588,7 @@ private_audit_result_schema:
           minLength: 5
           maxLength: 255
           pattern: "^[^/\\\\]+\\.[vV][dD][fF]$"
-        file_size_bytes: {type: integer, minimum: 1}
+        file_size_bytes: {type: integer, minimum: 1, maximum: 8589934592}
         sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
         active_scene_changed: {type: boolean, const: false}
       additionalProperties: false
@@ -565,7 +610,7 @@ private_audit_result_schema:
           minLength: 1
           maxLength: 255
           pattern: "^[^/\\\\]+$"
-        file_size_bytes: {type: integer, minimum: 1}
+        file_size_bytes: {type: integer, minimum: 1, maximum: 8589934592}
         sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
         scene_identity_fields: {$ref: "#/$defs/scene_identity_fields"}
         scene_identity_sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
@@ -592,6 +637,7 @@ private_audit_result_schema:
         - cancellation_disposition
         - handle_retention_owner
         - dispatch_count
+        - dispatch_attempt_reserved
         - poll_allowed
         - duplicate_execution_allowed
         - late_completion_disposition
@@ -618,7 +664,7 @@ private_audit_result_schema:
         status_tool: {type: string, const: jobs_get_status}
         status:
           type: string
-          enum: [terminal_not_dispatched, awaiting_late_readback, terminal]
+          enum: [terminal_not_dispatched, dispatch_uncertain, awaiting_late_readback, terminal]
         snapshot_source:
           type: string
           enum:
@@ -631,6 +677,7 @@ private_audit_result_schema:
             - transport_loss
             - cancellation_before_dispatch
             - cancellation_after_dispatch
+            - durable_dispatch_reservation
             - late_official_sdk_readback
         terminal_source:
           type: [string, "null"]
@@ -656,6 +703,7 @@ private_audit_result_schema:
             - released_after_terminal_readback
             - released_after_terminal_unknown
         dispatch_count: {type: integer, minimum: 0, maximum: 1}
+        dispatch_attempt_reserved: {type: boolean}
         poll_allowed: {type: boolean}
         duplicate_execution_allowed: {type: boolean, const: false}
         late_completion_disposition:
@@ -675,6 +723,42 @@ private_audit_result_schema:
         terminal_event_digest_sha256:
           type: [string, "null"]
           pattern: "^[0-9a-f]{64}$"
+    dispatch_uncertain_job_descriptor:
+      allOf:
+        - {$ref: "#/$defs/job_descriptor"}
+        - type: object
+          properties:
+            status: {type: string, const: dispatch_uncertain}
+            snapshot_source:
+              type: string
+              enum: [durable_dispatch_reservation, cancellation_after_dispatch]
+            terminal_source: {type: "null"}
+            cancellation_disposition:
+              type: string
+              enum: [not_requested, requested_after_dispatch_operation_continues]
+            cancellation_requested: {type: boolean}
+            cancellation_effective: {type: boolean, const: false}
+            handle_retention_owner:
+              type: string
+              const: trusted_adapter_local_restore_job_registry
+            dispatch_count: {type: integer, const: 0}
+            dispatch_attempt_reserved: {type: boolean, const: true}
+            poll_allowed: {type: boolean, const: true}
+            late_completion_disposition:
+              type: string
+              const: poll_exact_job_without_redispatch
+            terminal_event_id: {type: "null"}
+            terminal_event_digest_sha256: {type: "null"}
+        - oneOf:
+            - properties:
+                cancellation_disposition: {const: not_requested}
+                cancellation_requested: {const: false}
+                cancellation_effective: {const: false}
+            - properties:
+                cancellation_disposition: {const: requested_after_dispatch_operation_continues}
+                cancellation_requested: {const: true}
+                cancellation_effective: {const: false}
+      unevaluatedProperties: false
     pending_job_descriptor:
       allOf:
         - {$ref: "#/$defs/job_descriptor"}
@@ -694,6 +778,7 @@ private_audit_result_schema:
               type: string
               const: trusted_adapter_local_restore_job_registry
             dispatch_count: {type: integer, const: 1}
+            dispatch_attempt_reserved: {type: boolean, const: true}
             poll_allowed: {type: boolean, const: true}
             late_completion_disposition:
               type: string
@@ -729,6 +814,7 @@ private_audit_result_schema:
             cancellation_effective: {type: boolean}
             handle_retention_owner: {type: string, const: released_before_dispatch}
             dispatch_count: {type: integer, const: 0}
+            dispatch_attempt_reserved: {type: boolean, const: false}
             poll_allowed: {type: boolean, const: false}
             late_completion_disposition: {type: string, const: not_applicable}
             terminal_event_id: {type: string}
@@ -760,6 +846,7 @@ private_audit_result_schema:
             cancellation_effective: {type: boolean, const: false}
             handle_retention_owner: {type: string, const: released_after_terminal_readback}
             dispatch_count: {type: integer, const: 1}
+            dispatch_attempt_reserved: {type: boolean, const: true}
             poll_allowed: {type: boolean, const: false}
             late_completion_disposition:
               type: string
@@ -791,6 +878,7 @@ private_audit_result_schema:
             cancellation_effective: {type: boolean, const: false}
             handle_retention_owner: {type: string, const: released_after_terminal_unknown}
             dispatch_count: {type: integer, const: 1}
+            dispatch_attempt_reserved: {type: boolean, const: true}
             poll_allowed: {type: boolean, const: false}
             late_completion_disposition: {type: string, const: not_applicable}
             terminal_event_id: {type: string}
@@ -1130,6 +1218,7 @@ output_schema:
         - cancellation_disposition
         - handle_retention_owner
         - dispatch_count
+        - dispatch_attempt_reserved
         - poll_allowed
         - duplicate_execution_allowed
         - late_completion_disposition
@@ -1149,7 +1238,7 @@ output_schema:
         status_tool: {type: string, const: jobs_get_status}
         status:
           type: string
-          enum: [terminal_not_dispatched, awaiting_late_readback, terminal]
+          enum: [terminal_not_dispatched, dispatch_uncertain, awaiting_late_readback, terminal]
         snapshot_source:
           type: string
           enum:
@@ -1162,6 +1251,7 @@ output_schema:
             - transport_loss
             - cancellation_before_dispatch
             - cancellation_after_dispatch
+            - durable_dispatch_reservation
             - late_official_sdk_readback
         terminal_source:
           type: [string, "null"]
@@ -1187,6 +1277,7 @@ output_schema:
             - released_after_terminal_readback
             - released_after_terminal_unknown
         dispatch_count: {type: integer, minimum: 0, maximum: 1}
+        dispatch_attempt_reserved: {type: boolean}
         poll_allowed: {type: boolean}
         duplicate_execution_allowed: {type: boolean, const: false}
         late_completion_disposition:
@@ -1223,6 +1314,7 @@ output_schema:
             cancellation_effective: {type: boolean}
             handle_retention_owner: {type: string, const: released_before_dispatch}
             dispatch_count: {type: integer, const: 0}
+            dispatch_attempt_reserved: {type: boolean, const: false}
             poll_allowed: {type: boolean, const: false}
             late_completion_disposition: {type: string, const: not_applicable}
             terminal_event_hmac_sha256: {type: string}
@@ -1235,6 +1327,40 @@ output_schema:
                 cancellation_disposition: {const: honored_before_dispatch}
                 cancellation_requested: {const: true}
                 cancellation_effective: {const: true}
+    public_dispatch_uncertain_job:
+      allOf:
+        - {$ref: "#/$defs/public_job_descriptor"}
+        - type: object
+          properties:
+            status: {type: string, const: dispatch_uncertain}
+            snapshot_source:
+              type: string
+              enum: [durable_dispatch_reservation, cancellation_after_dispatch]
+            terminal_source: {type: "null"}
+            cancellation_disposition:
+              type: string
+              enum: [not_requested, requested_after_dispatch_operation_continues]
+            cancellation_requested: {type: boolean}
+            cancellation_effective: {type: boolean, const: false}
+            handle_retention_owner:
+              type: string
+              const: trusted_adapter_local_restore_job_registry
+            dispatch_count: {type: integer, const: 0}
+            dispatch_attempt_reserved: {type: boolean, const: true}
+            poll_allowed: {type: boolean, const: true}
+            late_completion_disposition:
+              type: string
+              const: poll_exact_job_without_redispatch
+            terminal_event_hmac_sha256: {type: "null"}
+        - oneOf:
+            - properties:
+                cancellation_disposition: {const: not_requested}
+                cancellation_requested: {const: false}
+                cancellation_effective: {const: false}
+            - properties:
+                cancellation_disposition: {const: requested_after_dispatch_operation_continues}
+                cancellation_requested: {const: true}
+                cancellation_effective: {const: false}
     public_pending_job:
       allOf:
         - {$ref: "#/$defs/public_job_descriptor"}
@@ -1254,6 +1380,7 @@ output_schema:
               type: string
               const: trusted_adapter_local_restore_job_registry
             dispatch_count: {type: integer, const: 1}
+            dispatch_attempt_reserved: {type: boolean, const: true}
             poll_allowed: {type: boolean, const: true}
             late_completion_disposition:
               type: string
@@ -1282,6 +1409,7 @@ output_schema:
             cancellation_effective: {type: boolean, const: false}
             handle_retention_owner: {type: string, const: released_after_terminal_readback}
             dispatch_count: {type: integer, const: 1}
+            dispatch_attempt_reserved: {type: boolean, const: true}
             poll_allowed: {type: boolean, const: false}
             late_completion_disposition:
               type: string
@@ -1308,6 +1436,7 @@ output_schema:
             cancellation_effective: {type: boolean, const: false}
             handle_retention_owner: {type: string, const: released_after_terminal_unknown}
             dispatch_count: {type: integer, const: 1}
+            dispatch_attempt_reserved: {type: boolean, const: true}
             poll_allowed: {type: boolean, const: false}
             late_completion_disposition: {type: string, const: not_applicable}
             terminal_event_hmac_sha256: {type: string}

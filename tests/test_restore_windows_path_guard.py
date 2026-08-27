@@ -198,3 +198,32 @@ def test_sdk_adapter_recaptures_handle_derived_component_chain_around_path_use(t
         assert loaded == retained.confirmed
         with pytest.raises(TypeError, match="RetainedWindowsPath"):
             adapter.open_scene(retained.dispatch_path)
+
+
+def test_oversize_target_is_rejected_before_streaming_or_buffering(tmp_path):
+    _, trusted_root, _, target, _, _ = _scene_layout(tmp_path)
+
+    retained = RetainedWindowsPath(
+        trusted_root,
+        target,
+        max_file_size_bytes=target.stat().st_size - 1,
+    )
+    with pytest.raises(ValueError, match="resource limit"):
+        with retained:
+            pass
+
+    assert retained.streamed_chunk_count == 0
+    assert not retained.all_handles_retained
+
+
+def test_target_hashing_streams_multiple_bounded_chunks(tmp_path):
+    _, trusted_root, _, target, _, confirmed_bytes = _scene_layout(tmp_path)
+
+    with RetainedWindowsPath(
+        trusted_root,
+        target,
+        hash_chunk_size_bytes=4,
+    ) as retained:
+        assert retained.confirmed.file_size_bytes == len(confirmed_bytes)
+        assert retained.confirmed.sha256 == hashlib.sha256(confirmed_bytes).hexdigest()
+        assert retained.streamed_chunk_count >= 4

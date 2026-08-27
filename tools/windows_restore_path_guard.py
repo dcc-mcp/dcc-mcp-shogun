@@ -24,6 +24,8 @@ FILE_ATTRIBUTE_TAG_INFO_CLASS = 9
 FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 VOLUME_NAME_GUID = 0x00000001
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+MAX_RESTORE_FILE_SIZE_BYTES = 8_589_934_592
+HASH_CHUNK_SIZE_BYTES = 65_536
 
 
 if os.name == "nt":
@@ -121,6 +123,7 @@ class WindowsFileIdentity:
 class OpenedScene:
     identity: WindowsFileIdentity
     sha256: str
+    file_size_bytes: int
 
 
 @dataclass(frozen=True)
@@ -208,11 +211,19 @@ def _identity(handle):
     )
 
 
-def _read_all(handle):
+def _file_size(handle):
+    info = _ByHandleFileInformation()
+    if not _kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
+        _win_error("GetFileInformationByHandle failed")
+    return (info.file_size_high << 32) | info.file_size_low
+
+
+def _streaming_sha256(handle, *, expected_size, chunk_size, on_chunk=None):
     if not _kernel32.SetFilePointerEx(handle, 0, None, FILE_BEGIN):
         _win_error("SetFilePointerEx failed")
-    chunks = []
-    buffer = ctypes.create_string_buffer(64 * 1024)
+    digest = hashlib.sha256()
+    total = 0
+    buffer = ctypes.create_string_buffer(chunk_size)
     while True:
         read_count = wintypes.DWORD()
         if not _kernel32.ReadFile(
@@ -225,14 +236,34 @@ def _read_all(handle):
             _win_error("ReadFile failed")
         if read_count.value == 0:
             break
-        chunks.append(buffer.raw[: read_count.value])
-    return b"".join(chunks)
+        digest.update(memoryview(buffer)[: read_count.value])
+        total += read_count.value
+        if on_chunk is not None:
+            on_chunk(read_count.value)
+    if total != expected_size:
+        raise ValueError("file size changed while streaming restore target")
+    return digest.hexdigest()
 
 
-def _capture(handle):
+def _capture(
+    handle,
+    *,
+    max_file_size_bytes=MAX_RESTORE_FILE_SIZE_BYTES,
+    hash_chunk_size_bytes=HASH_CHUNK_SIZE_BYTES,
+    on_chunk=None,
+):
+    file_size_bytes = _file_size(handle)
+    if not 1 <= file_size_bytes <= max_file_size_bytes:
+        raise ValueError("restore target exceeds approved resource limit")
     return OpenedScene(
         identity=_identity(handle),
-        sha256=hashlib.sha256(_read_all(handle)).hexdigest(),
+        sha256=_streaming_sha256(
+            handle,
+            expected_size=file_size_bytes,
+            chunk_size=hash_chunk_size_bytes,
+            on_chunk=on_chunk,
+        ),
+        file_size_bytes=file_size_bytes,
     )
 
 
@@ -300,9 +331,22 @@ def create_junction(link, target):
 class RetainedWindowsPath:
     """Retain every directory handle and the confirmed target across dispatch."""
 
-    def __init__(self, trusted_root, target):
+    def __init__(
+        self,
+        trusted_root,
+        target,
+        *,
+        max_file_size_bytes=MAX_RESTORE_FILE_SIZE_BYTES,
+        hash_chunk_size_bytes=HASH_CHUNK_SIZE_BYTES,
+    ):
+        if max_file_size_bytes < 1:
+            raise ValueError("max file size must be positive")
+        if hash_chunk_size_bytes < 1:
+            raise ValueError("hash chunk size must be positive")
         self.trusted_root = Path(trusted_root).absolute()
         self.target = Path(target).absolute()
+        self.max_file_size_bytes = max_file_size_bytes
+        self.hash_chunk_size_bytes = hash_chunk_size_bytes
         self._handles = []
         self._directory_paths = []
         self._trusted_root_index = None
@@ -310,6 +354,18 @@ class RetainedWindowsPath:
         self.dispatch_path = None
         self.component_evidence = ()
         self.recapture_count = 0
+        self.streamed_chunk_count = 0
+
+    def _record_streamed_chunk(self, _size):
+        self.streamed_chunk_count += 1
+
+    def _capture_target(self, handle):
+        return _capture(
+            handle,
+            max_file_size_bytes=self.max_file_size_bytes,
+            hash_chunk_size_bytes=self.hash_chunk_size_bytes,
+            on_chunk=self._record_streamed_chunk,
+        )
 
     def __enter__(self):
         _reject_alternate_data_stream(self.trusted_root)
@@ -332,7 +388,7 @@ class RetainedWindowsPath:
             self._handles.append(target_handle)
             _reject_reparse(target_handle)
             _reject_unsafe_hardlinks(target_handle)
-            self.confirmed = _capture(target_handle)
+            self.confirmed = self._capture_target(target_handle)
             self.component_evidence = self._capture_component_chain()
             self.dispatch_path = self.component_evidence[-1].final_path
             return self
@@ -374,7 +430,7 @@ class RetainedWindowsPath:
             raise RuntimeError("retained path is closed")
         _reject_unsafe_hardlinks(self._handles[-1])
         evidence = self._capture_component_chain()
-        current_target = _capture(self._handles[-1])
+        current_target = self._capture_target(self._handles[-1])
         self.recapture_count += 1
         if evidence != self.component_evidence or current_target != self.confirmed:
             raise ValueError("retained path identity changed before use")
@@ -398,7 +454,7 @@ class WindowsSdkPathAdapter:
         dispatch_path = retained_path.prepare_for_path_use()
         handle = _open_handle(dispatch_path, directory=False)
         try:
-            opened_scene = _capture(handle)
+            opened_scene = retained_path._capture_target(handle)
         finally:
             _close_handle(handle)
         retained_path.verify_path_use(opened_scene)
