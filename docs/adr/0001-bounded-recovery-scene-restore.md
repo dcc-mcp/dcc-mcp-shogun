@@ -130,12 +130,13 @@ before/after terminal receipt or explicit unknown effect
   path resolve to a different file identity. This harness never invokes Shogun
   and therefore proves Windows path mechanics, not official SDK compatibility.
 - A false `CloseHandle` return is not itself proof that the numeric handle is
-  still owned. Independently probe handle validity and the captured file
-  identity. Classify the result as closed, still owned, or indeterminate. Remove
-  a verified-closed numeric handle and never retry it; retain only a verified
-  still-owned exact identity; quarantine an indeterminate value without retrying
-  it or claiming release. Cleanup diagnostics never replace an established
-  primary operation outcome.
+  still owned. Probe only for independent proof that the value is closed. A
+  valid numeric value, even one that resolves to the same captured file identity,
+  may be a different handle created after immediate value reuse; the available
+  Windows APIs provide no generation proof tying it to the original open. Treat
+  that case as indeterminate, remove it from retry ownership, and quarantine it
+  without closing a possible later owner or claiming release. Cleanup diagnostics
+  never replace an established primary operation outcome.
 - A detected change after host connection returns `target_guard_rejected` with
   unknown effect, the bounded before receipt, null after receipt, and both
   confirmation consumption and SDK dispatch false. The executable invariant is
@@ -264,15 +265,21 @@ before/after terminal receipt or explicit unknown effect
   owner's guard. While the exact claim fence and guard ownership are still
   current, the adapter first atomically writes `cleanup_pending`, bound by
   digest to the job, event, operation, and exact guard owner/generation. Only
-  then may it attempt release. The typed, redacted close observation is closed,
-  still owned, or indeterminate. The cleanup protocol preserves the primary restore outcome.
-  A verified still-owned guard remains with the exact registry owner;
+  then may it attempt release. A failure before release is attempted can leave the
+  exact guard with its registry owner. Once `CloseHandle` returns false, the
+  typed, redacted close observation is only independently verified closed or
+  indeterminate; numeric validity and same-file identity cannot prove the original
+  handle generation. The cleanup protocol preserves the primary restore outcome.
+  A guard retained before any close attempt remains with the exact registry owner;
   an indeterminate numeric value moves to a non-retry quarantine and is never
   described as released. It never claims that a guard was released without an
   independent closed observation. A crash between release and disposition persistence is
-  restart-recoverable from the exact pending record. Reconciliation must write
-  the terminal record and permanent tombstone and notify waiters without a
-  second dispatch or read-back.
+  restart-recoverable from the exact pending record. Terminalization retains a
+  durable cleanup-commit marker until the terminal record, exact idempotent
+  tombstone, and a monotonic per-job notification state are all durable. A crash
+  after publishing any earlier artifact therefore replays the remaining artifacts
+  on restart and clears the marker only after convergence, without a second
+  dispatch or read-back.
   A cancellation arriving while that claim owns read-back is written as a
   durable, HMAC-bound claim-bound cancellation intent in a separate audit
   record. It does not advance the claimed job revision. The terminal CAS folds
@@ -320,8 +327,10 @@ before/after terminal receipt or explicit unknown effect
   exact durable claim fence. The adapter persists the exact guard-bound
   `cleanup_pending` record before attempting cleanup for that claimant. It then
   writes the typed cleanup disposition, terminal record, and permanent tombstone
-  and must notify every waiter even when release fails. A restart reconciles any
-  pending cleanup to those same terminal artifacts. A verified retained owner or
+  and must notify every waiter even when release fails. The durable commit marker
+  remains replayable across failures between terminal publication, tombstone
+  persistence, and notification-state persistence. A restart reconciles either a
+  release-pending or commit-pending cleanup to those same terminal artifacts. A verified retained owner or
   indeterminate quarantine remains explicit in both private and public-safe
   lifecycle fields; raw close diagnostics never replace or enter the primary
   result. Later or duplicate polling returns the terminal descriptor without

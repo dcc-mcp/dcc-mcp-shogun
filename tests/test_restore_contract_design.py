@@ -1054,6 +1054,51 @@ def test_cleanup_resolution_crash_after_release_reconciles_on_registry_restart()
     assert sdk.dispatch_count == sdk.readback_count == 1
 
 
+def test_tombstone_write_crash_replays_terminalization_and_notification_after_restart():
+    durable_store = FakeDurableJobStore()
+    durable_store.fail_tombstone_write_once = True
+    workflow, _, sdk, job_id = _pending_async_workflow(durable_store)
+
+    with pytest.raises(RuntimeError, match="simulated crash during tombstone commit"):
+        workflow.poll(job_id, late_success=True)
+
+    stranded = durable_store.records[job_id]
+    assert stranded["status"] == "terminal"
+    assert job_id not in durable_store.tombstones
+    assert durable_store.waiter_notification_count == 0
+    assert sdk.dispatch_count == sdk.readback_count == 1
+
+    restarted = FakeAsyncRestoreJobRegistry(durable_store)
+    terminal = restarted.descriptor(job_id)
+
+    assert terminal["status"] == "terminal"
+    assert restarted.tombstone(job_id)["terminal_event_id"] == terminal["terminal_event_id"]
+    assert durable_store.waiter_notification_count == 1
+    assert sdk.dispatch_count == sdk.readback_count == 1
+
+
+def test_waiter_notification_crash_replays_after_durable_tombstone_on_restart():
+    durable_store = FakeDurableJobStore()
+    durable_store.fail_waiter_notification_once = True
+    workflow, _, sdk, job_id = _pending_async_workflow(durable_store)
+
+    with pytest.raises(RuntimeError, match="simulated crash before waiter notification"):
+        workflow.poll(job_id, late_success=True)
+
+    stranded = durable_store.records[job_id]
+    assert stranded["status"] == "terminal"
+    assert durable_store.tombstones[job_id]["terminal_event_id"] == stranded["terminal_event_id"]
+    assert durable_store.waiter_notification_count == 0
+    assert sdk.dispatch_count == sdk.readback_count == 1
+
+    restarted = FakeAsyncRestoreJobRegistry(durable_store)
+    terminal = restarted.descriptor(job_id)
+
+    assert restarted.tombstone(job_id)["terminal_event_id"] == terminal["terminal_event_id"]
+    assert durable_store.waiter_notification_count == 1
+    assert sdk.dispatch_count == sdk.readback_count == 1
+
+
 def test_status_read_reconciles_cleanup_pending_before_publication():
     durable_store = FakeDurableJobStore()
     durable_store.cleanup_store.crash_after_release_once = True
@@ -2459,6 +2504,9 @@ class FakeDurableJobStore:
         self.cancellation_intents = {}
         self.reserved_job_ids = set()
         self.cleanup_store = FakeDurableCleanupStore()
+        self.fail_tombstone_write_once = False
+        self.fail_waiter_notification_once = False
+        self.notified_jobs = set()
         self.waiter_notification_count = 0
 
     def start_generation(self):
@@ -2506,6 +2554,8 @@ class FakeAsyncRestoreJobRegistry:
         "readback_claim_fence_revision",
         "cleanup_pending",
         "cleanup_terminal_plan",
+        "cleanup_commit_pending",
+        "cleanup_commit_record",
     }
 
     def __init__(self, durable_store=None):
@@ -2583,6 +2633,8 @@ class FakeAsyncRestoreJobRegistry:
                 "completion_event": None,
                 "cleanup_pending": None,
                 "cleanup_terminal_plan": None,
+                "cleanup_commit_pending": False,
+                "cleanup_commit_record": None,
             }
         return job_id
 
@@ -2643,7 +2695,7 @@ class FakeAsyncRestoreJobRegistry:
 
     def _write_tombstone(self, record, cleanup_record=None):
         completion_event = record["completion_event"]
-        self.store.tombstones[record["job_id"]] = {
+        tombstone = {
             "job_id": record["job_id"],
             "job_generation": record["job_generation"],
             "operation_binding_sha256": record["operation_binding_sha256"],
@@ -2661,6 +2713,33 @@ class FakeAsyncRestoreJobRegistry:
             "cleanup_disposition": record["cleanup_disposition"],
             "handle_retention_owner": record["handle_retention_owner"],
         }
+        existing = self.store.tombstones.get(record["job_id"])
+        if existing is not None:
+            if existing != tombstone:
+                raise RuntimeError("durable tombstone binding rejected")
+            return
+        if self.store.fail_tombstone_write_once:
+            self.store.fail_tombstone_write_once = False
+            raise RuntimeError("simulated crash during tombstone commit")
+        self.store.tombstones[record["job_id"]] = tombstone
+
+    def _commit_cleanup_artifacts(self, record):
+        cleanup_record = record.get("cleanup_commit_record")
+        if not record.get("cleanup_commit_pending") or cleanup_record is None:
+            raise RuntimeError("durable cleanup commit marker rejected")
+        self._write_tombstone(record, cleanup_record)
+        job_id = record["job_id"]
+        if job_id not in self.store.notified_jobs:
+            if self.store.fail_waiter_notification_once:
+                self.store.fail_waiter_notification_once = False
+                raise RuntimeError("simulated crash before waiter notification")
+            self.store.notified_jobs.add(job_id)
+            self.store.waiter_notification_count += 1
+            self.store.condition.notify_all()
+        record["cleanup_pending"] = None
+        record["cleanup_terminal_plan"] = None
+        record["cleanup_commit_pending"] = False
+        record["cleanup_commit_record"] = None
 
     def _finalize_cleanup(self, record, cleanup_record):
         plan = record["cleanup_terminal_plan"]
@@ -2703,14 +2782,15 @@ class FakeAsyncRestoreJobRegistry:
                 if cleanup_disposition == "release_failed_owner_retained"
                 else None
             ),
-            cleanup_pending=None,
-            cleanup_terminal_plan=None,
+            cleanup_commit_pending=True,
+            cleanup_commit_record=dict(cleanup_record),
         )
-        self._write_tombstone(record, cleanup_record)
-        self.store.waiter_notification_count += 1
-        self.store.condition.notify_all()
+        self._commit_cleanup_artifacts(record)
 
     def _reconcile_cleanup_record(self, record):
+        if record.get("cleanup_commit_pending"):
+            self._commit_cleanup_artifacts(record)
+            return
         pending = record.get("cleanup_pending")
         plan = record.get("cleanup_terminal_plan")
         guard = record.get("guard")
@@ -2734,7 +2814,9 @@ class FakeAsyncRestoreJobRegistry:
     def _reconcile_pending_cleanups(self):
         with self.store.condition:
             for record in self._records.values():
-                if record.get("status") == "cleanup_pending":
+                if record.get("status") == "cleanup_pending" or record.get(
+                    "cleanup_commit_pending"
+                ):
                     self._reconcile_cleanup_record(record)
 
     def retain_handles(self, job_id, guard, guard_token):
@@ -3250,7 +3332,7 @@ class FakeAsyncRestoreJobRegistry:
     def descriptor(self, job_id):
         with self.store.condition:
             record = self._records[job_id]
-            if record["status"] == "cleanup_pending":
+            if record["status"] == "cleanup_pending" or record.get("cleanup_commit_pending"):
                 self._reconcile_cleanup_record(record)
             if record["status"] == "readback_in_progress":
                 while record["status"] == "readback_in_progress":
@@ -4341,11 +4423,13 @@ def test_target_guard_freezes_exact_confirmed_file_through_dispatch_and_readback
         "swap_attempt_while_pinned": "blocked_by_windows_share_contract",
         "close_semantics": {
             "close_api": "CloseHandle",
-            "false_return": "independently_probe_handle_validity_and_exact_identity",
-            "observations": ["closed", "still_owned", "indeterminate"],
+            "false_return": "independently_probe_only_for_verified_closed",
+            "observations": ["closed", "indeterminate"],
             "closed": "remove_numeric_handle_and_never_retry",
-            "still_owned": "retain_by_exact_owner",
+            "valid_numeric_after_false": "indeterminate_due_to_unprovable_handle_generation",
+            "same_file_same_numeric_reuse": "cannot_prove_original_ownership",
             "indeterminate": "quarantine_without_retry_or_release_claim",
+            "retry_after_false_return": "forbidden",
             "primary_outcome": "preserved",
         },
         "adversarial_proof": {
@@ -4693,8 +4777,11 @@ def test_contract_records_semantic_gates_not_expressible_in_json_schema():
         "public_payload_projection": "fixed_message_and_error_only",
         "cleanup_store": "durable_exact_guard_bound_cleanup_record_v2",
         "cleanup_pending": "persisted_before_guard_release",
+        "cleanup_commit_marker": (
+            "retained_until_terminal_tombstone_and_notification_state_are_durable"
+        ),
         "restart_reconciliation": (
-            "exact_pending_record_to_terminal_tombstone_and_waiter_notification"
+            "exact_pending_or_commit_marker_to_terminal_tombstone_and_waiter_notification"
         ),
         "cleanup_failure": "preserve_primary_result_and_retain_owner_until_verified_closed",
     }
@@ -4798,9 +4885,12 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
         "pending_state": "cleanup_pending_not_publicly_publishable",
         "pending_write": "atomic_before_guard_release_under_exact_claim_fence",
         "release_attempt": "only_after_durable_cleanup_pending",
-        "release_observation": ("independently_verified_closed_still_owned_or_indeterminate"),
+        "release_observation": ("verified_not_attempted_still_owned_closed_or_indeterminate"),
+        "commit_marker": ("durable_until_terminal_tombstone_and_notification_state_are_durable"),
+        "tombstone_commit": "idempotent_exact_binding",
+        "waiter_notification_state": "durable_monotonic_per_job",
         "restart_reconciliation": (
-            "exact_pending_binding_to_terminal_tombstone_and_waiter_notification"
+            "exact_pending_or_commit_marker_to_terminal_tombstone_and_waiter_notification"
         ),
         "synchronous_path": "same_durable_job_registry_and_cleanup_protocol",
         "dispositions": [

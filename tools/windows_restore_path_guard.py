@@ -202,30 +202,25 @@ def _reject_unsafe_hardlinks(handle):
         raise ValueError("hardlink aliases are not restore authority")
 
 
-def _probe_handle_after_failed_close(handle, expected_identity):
+def _probe_handle_after_failed_close(handle):
     flags = wintypes.DWORD()
     ctypes.set_last_error(0)
     if not _kernel32.GetHandleInformation(handle, ctypes.byref(flags)):
         if ctypes.get_last_error() == ERROR_INVALID_HANDLE:
             return HandleCloseObservation("closed")
         return HandleCloseObservation("indeterminate")
-    if expected_identity is None:
-        return HandleCloseObservation("indeterminate")
-    try:
-        observed_identity = _identity(handle)
-    except OSError:
-        return HandleCloseObservation("indeterminate")
-    if observed_identity == expected_identity:
-        return HandleCloseObservation("still_owned")
+    # A valid numeric value cannot prove ownership of the original handle:
+    # Windows may already have reused that value for a different handle,
+    # including one opened on the same file identity.
     return HandleCloseObservation("indeterminate")
 
 
-def _close_handle(handle, *, expected_identity=None):
+def _close_handle(handle):
     if handle in (None, INVALID_HANDLE_VALUE):
         return HandleCloseObservation("closed")
     if _kernel32.CloseHandle(handle):
         return HandleCloseObservation("closed")
-    return _probe_handle_after_failed_close(handle, expected_identity)
+    return _probe_handle_after_failed_close(handle)
 
 
 def _identity(handle):
@@ -465,7 +460,7 @@ class RetainedWindowsPath:
         while self._handles:
             handle = self._handles[-1]
             expected_identity = self._handle_identities[-1]
-            observation = _close_handle(handle, expected_identity=expected_identity)
+            observation = _close_handle(handle)
             if observation.state == "closed":
                 self._handles.pop()
                 self._handle_identities.pop()
@@ -525,10 +520,7 @@ class WindowsSdkPathAdapter:
         try:
             opened_scene = retained_path._capture_target(handle)
         finally:
-            observation = _close_handle(
-                handle,
-                expected_identity=(opened_scene.identity if opened_scene is not None else None),
-            )
+            observation = _close_handle(handle)
             if observation.state != "closed":
                 raise OSError("SDK path adapter handle cleanup not confirmed")
         retained_path.verify_path_use(opened_scene)
@@ -541,9 +533,6 @@ class WindowsSdkPathAdapter:
             opened_scene = _capture(handle)
             return opened_scene
         finally:
-            observation = _close_handle(
-                handle,
-                expected_identity=(opened_scene.identity if opened_scene is not None else None),
-            )
+            observation = _close_handle(handle)
             if observation.state != "closed":
                 raise OSError("path control handle cleanup not confirmed")

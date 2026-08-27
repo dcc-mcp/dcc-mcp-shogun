@@ -67,7 +67,8 @@ synchronous_completion:
   public_payload_projection: fixed_message_and_error_only
   cleanup_store: durable_exact_guard_bound_cleanup_record_v2
   cleanup_pending: persisted_before_guard_release
-  restart_reconciliation: exact_pending_record_to_terminal_tombstone_and_waiter_notification
+  cleanup_commit_marker: retained_until_terminal_tombstone_and_notification_state_are_durable
+  restart_reconciliation: exact_pending_or_commit_marker_to_terminal_tombstone_and_waiter_notification
   cleanup_failure: preserve_primary_result_and_retain_owner_until_verified_closed
 
 preconditions:
@@ -162,8 +163,11 @@ async_job_contract:
     pending_state: cleanup_pending_not_publicly_publishable
     pending_write: atomic_before_guard_release_under_exact_claim_fence
     release_attempt: only_after_durable_cleanup_pending
-    release_observation: independently_verified_closed_still_owned_or_indeterminate
-    restart_reconciliation: exact_pending_binding_to_terminal_tombstone_and_waiter_notification
+    release_observation: verified_not_attempted_still_owned_closed_or_indeterminate
+    commit_marker: durable_until_terminal_tombstone_and_notification_state_are_durable
+    tombstone_commit: idempotent_exact_binding
+    waiter_notification_state: durable_monotonic_per_job
+    restart_reconciliation: exact_pending_or_commit_marker_to_terminal_tombstone_and_waiter_notification
     synchronous_path: same_durable_job_registry_and_cleanup_protocol
     dispositions:
       - not_started
@@ -580,11 +584,13 @@ target_guard:
   swap_attempt_while_pinned: blocked_by_windows_share_contract
   close_semantics:
     close_api: CloseHandle
-    false_return: independently_probe_handle_validity_and_exact_identity
-    observations: [closed, still_owned, indeterminate]
+    false_return: independently_probe_only_for_verified_closed
+    observations: [closed, indeterminate]
     closed: remove_numeric_handle_and_never_retry
-    still_owned: retain_by_exact_owner
+    valid_numeric_after_false: indeterminate_due_to_unprovable_handle_generation
+    same_file_same_numeric_reuse: cannot_prove_original_ownership
     indeterminate: quarantine_without_retry_or_release_claim
+    retry_after_false_return: forbidden
     primary_outcome: preserved
   adversarial_proof:
     phases: [preflight, recapture, cas, dispatch]

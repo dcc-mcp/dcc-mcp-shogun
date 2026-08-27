@@ -230,7 +230,7 @@ def test_target_hashing_streams_multiple_bounded_chunks(tmp_path):
         assert retained.streamed_chunk_count >= 4
 
 
-def test_close_handle_failure_is_observable_and_retains_exact_cleanup_owner(
+def test_close_handle_false_with_same_file_handle_reuse_is_never_retained_or_retried(
     tmp_path,
     monkeypatch,
 ):
@@ -238,18 +238,79 @@ def test_close_handle_failure_is_observable_and_retains_exact_cleanup_owner(
     retained = RetainedWindowsPath(trusted_root, target)
     retained.__enter__()
     original_close_handle = path_guard._kernel32.CloseHandle
+    target_handle = retained._handles[-1]
+    replacement_handle = None
+    spare_handles = []
 
+    def close_then_reuse_same_numeric_handle(handle):
+        nonlocal replacement_handle
+        assert handle == target_handle
+        assert original_close_handle(handle)
+        for _ in range(256):
+            candidate = path_guard._open_handle(target, directory=False)
+            if candidate == target_handle:
+                replacement_handle = candidate
+                break
+            spare_handles.append(candidate)
+        assert replacement_handle == target_handle, "Windows did not reuse the closed handle value"
+        return 0
+
+    monkeypatch.setattr(
+        path_guard._kernel32,
+        "CloseHandle",
+        close_then_reuse_same_numeric_handle,
+    )
     try:
-        monkeypatch.setattr(path_guard._kernel32, "CloseHandle", lambda _handle: 0)
-        with pytest.raises(OSError, match="CloseHandle failed"):
+        with pytest.raises(OSError, match="ownership indeterminate"):
             retained.close()
 
-        assert retained.all_handles_retained
+        assert retained.cleanup_state == "indeterminate"
+        assert target_handle not in retained._handles
+        assert path_guard._identity(replacement_handle) == retained.confirmed.identity
+    finally:
+        monkeypatch.setattr(path_guard._kernel32, "CloseHandle", original_close_handle)
+        if target_handle in retained._handles:
+            index = retained._handles.index(target_handle)
+            retained._handles.pop(index)
+            retained._handle_identities.pop(index)
+        retained.close()
+        for handle in spare_handles:
+            assert original_close_handle(handle)
+        if replacement_handle is not None:
+            assert original_close_handle(replacement_handle)
+
+
+def test_close_handle_false_without_closed_proof_is_quarantined_and_not_retried(
+    tmp_path,
+    monkeypatch,
+):
+    _, trusted_root, _, target, _, _ = _scene_layout(tmp_path)
+    retained = RetainedWindowsPath(trusted_root, target)
+    retained.__enter__()
+    original_close_handle = path_guard._kernel32.CloseHandle
+    target_handle = retained._handles[-1]
+    close_calls = []
+
+    def report_false(handle):
+        close_calls.append(handle)
+        return 0
+
+    try:
+        monkeypatch.setattr(path_guard._kernel32, "CloseHandle", report_false)
+        with pytest.raises(OSError, match="ownership indeterminate"):
+            retained.close()
+
+        assert retained.cleanup_state == "indeterminate"
+        assert retained.all_handles_retained is False
+        assert close_calls == [target_handle]
+        assert target_handle not in retained._handles
     finally:
         monkeypatch.setattr(path_guard._kernel32, "CloseHandle", original_close_handle)
         retained.close()
+        assert original_close_handle(target_handle)
 
     assert retained.all_handles_retained is False
+    assert close_calls == [target_handle]
 
 
 def test_close_handle_false_after_real_close_is_verified_and_never_retried(
@@ -335,16 +396,21 @@ def test_context_cleanup_failure_does_not_replace_the_primary_operation_error(
     retained = RetainedWindowsPath(trusted_root, target)
     original_close_handle = path_guard._kernel32.CloseHandle
     primary_error = "primary SDK result failed_unknown"
+    quarantined_handle = None
 
     try:
         with pytest.raises(RuntimeError, match=primary_error):
             with retained:
+                quarantined_handle = retained._handles[-1]
                 monkeypatch.setattr(path_guard._kernel32, "CloseHandle", lambda _handle: 0)
                 raise RuntimeError(primary_error)
 
-        assert retained.all_handles_retained
+        assert retained.cleanup_state == "indeterminate"
+        assert retained.all_handles_retained is False
     finally:
         monkeypatch.setattr(path_guard._kernel32, "CloseHandle", original_close_handle)
         retained.close()
+        if quarantined_handle is not None:
+            assert original_close_handle(quarantined_handle)
 
     assert retained.all_handles_retained is False
