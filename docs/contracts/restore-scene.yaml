@@ -67,7 +67,7 @@ synchronous_completion:
   public_payload_projection: fixed_message_and_error_only
   cleanup_store: durable_exact_guard_bound_cleanup_record_v2
   cleanup_pending: persisted_before_guard_release
-  cleanup_commit_marker: retained_until_terminal_tombstone_and_notification_state_are_durable
+  cleanup_commit_marker: retained_until_terminal_tombstone_and_waiter_wakeup_complete
   restart_reconciliation: exact_pending_or_commit_marker_to_terminal_tombstone_and_waiter_notification
   cleanup_failure: preserve_primary_result_and_retain_owner_until_verified_closed
 
@@ -164,9 +164,11 @@ async_job_contract:
     pending_write: atomic_before_guard_release_under_exact_claim_fence
     release_attempt: only_after_durable_cleanup_pending
     release_observation: verified_not_attempted_still_owned_closed_or_indeterminate
-    commit_marker: durable_until_terminal_tombstone_and_notification_state_are_durable
+    commit_marker: durable_until_terminal_tombstone_and_waiter_wakeup_complete
     tombstone_commit: idempotent_exact_binding
-    waiter_notification_state: durable_monotonic_per_job
+    waiter_notification_intent: durable_replayable_until_notify_all_returns
+    waiter_delivery: at_least_once
+    pre_notify_completion_flag: forbidden
     restart_reconciliation: exact_pending_or_commit_marker_to_terminal_tombstone_and_waiter_notification
     synchronous_path: same_durable_job_registry_and_cleanup_protocol
     dispositions:

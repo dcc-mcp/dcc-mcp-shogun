@@ -1099,6 +1099,32 @@ def test_waiter_notification_crash_replays_after_durable_tombstone_on_restart():
     assert sdk.dispatch_count == sdk.readback_count == 1
 
 
+def test_notification_intent_crash_replays_wakeup_before_cleanup_commit_clears():
+    durable_store = FakeDurableJobStore()
+    durable_store.fail_after_notification_intent_once = True
+    workflow, _, sdk, job_id = _pending_async_workflow(durable_store)
+
+    with pytest.raises(RuntimeError, match="simulated crash after durable notification intent"):
+        workflow.poll(job_id, late_success=True)
+
+    stranded = durable_store.records[job_id]
+    assert stranded["status"] == "terminal"
+    assert stranded["cleanup_commit_pending"] is True
+    assert durable_store.tombstones[job_id]["terminal_event_id"] == stranded["terminal_event_id"]
+    assert job_id in durable_store.notification_pending_jobs
+    assert durable_store.waiter_notification_count == 0
+    assert sdk.dispatch_count == sdk.readback_count == 1
+
+    restarted = FakeAsyncRestoreJobRegistry(durable_store)
+    terminal = restarted.descriptor(job_id)
+
+    assert terminal["status"] == "terminal"
+    assert durable_store.waiter_notification_count == 1
+    assert job_id not in durable_store.notification_pending_jobs
+    assert durable_store.records[job_id]["cleanup_commit_pending"] is False
+    assert sdk.dispatch_count == sdk.readback_count == 1
+
+
 def test_status_read_reconciles_cleanup_pending_before_publication():
     durable_store = FakeDurableJobStore()
     durable_store.cleanup_store.crash_after_release_once = True
@@ -2506,7 +2532,8 @@ class FakeDurableJobStore:
         self.cleanup_store = FakeDurableCleanupStore()
         self.fail_tombstone_write_once = False
         self.fail_waiter_notification_once = False
-        self.notified_jobs = set()
+        self.fail_after_notification_intent_once = False
+        self.notification_pending_jobs = set()
         self.waiter_notification_count = 0
 
     def start_generation(self):
@@ -2729,13 +2756,16 @@ class FakeAsyncRestoreJobRegistry:
             raise RuntimeError("durable cleanup commit marker rejected")
         self._write_tombstone(record, cleanup_record)
         job_id = record["job_id"]
-        if job_id not in self.store.notified_jobs:
-            if self.store.fail_waiter_notification_once:
-                self.store.fail_waiter_notification_once = False
-                raise RuntimeError("simulated crash before waiter notification")
-            self.store.notified_jobs.add(job_id)
-            self.store.waiter_notification_count += 1
-            self.store.condition.notify_all()
+        if self.store.fail_waiter_notification_once:
+            self.store.fail_waiter_notification_once = False
+            raise RuntimeError("simulated crash before waiter notification")
+        self.store.notification_pending_jobs.add(job_id)
+        if self.store.fail_after_notification_intent_once:
+            self.store.fail_after_notification_intent_once = False
+            raise RuntimeError("simulated crash after durable notification intent")
+        self.store.condition.notify_all()
+        self.store.waiter_notification_count += 1
+        self.store.notification_pending_jobs.discard(job_id)
         record["cleanup_pending"] = None
         record["cleanup_terminal_plan"] = None
         record["cleanup_commit_pending"] = False
@@ -4777,9 +4807,7 @@ def test_contract_records_semantic_gates_not_expressible_in_json_schema():
         "public_payload_projection": "fixed_message_and_error_only",
         "cleanup_store": "durable_exact_guard_bound_cleanup_record_v2",
         "cleanup_pending": "persisted_before_guard_release",
-        "cleanup_commit_marker": (
-            "retained_until_terminal_tombstone_and_notification_state_are_durable"
-        ),
+        "cleanup_commit_marker": "retained_until_terminal_tombstone_and_waiter_wakeup_complete",
         "restart_reconciliation": (
             "exact_pending_or_commit_marker_to_terminal_tombstone_and_waiter_notification"
         ),
@@ -4886,9 +4914,11 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
         "pending_write": "atomic_before_guard_release_under_exact_claim_fence",
         "release_attempt": "only_after_durable_cleanup_pending",
         "release_observation": ("verified_not_attempted_still_owned_closed_or_indeterminate"),
-        "commit_marker": ("durable_until_terminal_tombstone_and_notification_state_are_durable"),
+        "commit_marker": "durable_until_terminal_tombstone_and_waiter_wakeup_complete",
         "tombstone_commit": "idempotent_exact_binding",
-        "waiter_notification_state": "durable_monotonic_per_job",
+        "waiter_notification_intent": "durable_replayable_until_notify_all_returns",
+        "waiter_delivery": "at_least_once",
+        "pre_notify_completion_flag": "forbidden",
         "restart_reconciliation": (
             "exact_pending_or_commit_marker_to_terminal_tombstone_and_waiter_notification"
         ),

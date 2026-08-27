@@ -275,11 +275,13 @@ before/after terminal receipt or explicit unknown effect
   described as released. It never claims that a guard was released without an
   independent closed observation. A crash between release and disposition persistence is
   restart-recoverable from the exact pending record. Terminalization retains a
-  durable cleanup-commit marker until the terminal record, exact idempotent
-  tombstone, and a monotonic per-job notification state are all durable. A crash
-  after publishing any earlier artifact therefore replays the remaining artifacts
-  on restart and clears the marker only after convergence, without a second
-  dispatch or read-back.
+  durable cleanup-commit marker until the terminal record and exact idempotent
+  tombstone are durable and `notify_all` has actually returned. Before attempting
+  notification it persists only a replayable pending intent, never a completion
+  flag. A crash after that intent but before or during notification therefore
+  retries wakeup on restart. A crash after wakeup but before marker removal may
+  notify again, providing at-least-once delivery without a second dispatch or
+  read-back.
   A cancellation arriving while that claim owns read-back is written as a
   durable, HMAC-bound claim-bound cancellation intent in a separate audit
   record. It does not advance the claimed job revision. The terminal CAS folds
@@ -329,12 +331,12 @@ before/after terminal receipt or explicit unknown effect
   writes the typed cleanup disposition, terminal record, and permanent tombstone
   and must notify every waiter even when release fails. The durable commit marker
   remains replayable across failures between terminal publication, tombstone
-  persistence, and notification-state persistence. A restart reconciles either a
-  release-pending or commit-pending cleanup to those same terminal artifacts. A verified retained owner or
-  indeterminate quarantine remains explicit in both private and public-safe
-  lifecycle fields; raw close diagnostics never replace or enter the primary
-  result. Later or duplicate polling returns the terminal descriptor without
-  another read-back or dispatch.
+  persistence, durable notification intent, and actual waiter wakeup. A restart
+  reconciles either a release-pending or commit-pending cleanup to those same
+  terminal artifacts. A verified retained owner or indeterminate quarantine
+  remains explicit in both private and public-safe lifecycle fields; raw close
+  diagnostics never replace or enter the primary result. Later or duplicate
+  polling returns the terminal descriptor without another read-back or dispatch.
 - `scene_identity_sha256` is not an opaque implementation choice. Treat
   `GetSceneName` as an exact two-string `(scene_path, name-or-path)` tuple. For a
   saved scene, `scene_path` is an absolute Windows directory. If the second
