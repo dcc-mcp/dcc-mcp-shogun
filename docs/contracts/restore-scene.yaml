@@ -1,4 +1,4 @@
-contract_version: "1.7"
+contract_version: "1.8"
 status: proposed-design-only
 implementation_authorized: false
 
@@ -50,7 +50,16 @@ private_audit_contract:
     - raw_scene_and_take_names
     - full_before_after_and_recovery_receipts
     - raw_sdk_and_internal_diagnostics
+    - durable_readback_claim_fence
   public_projection: adapter_secret_hmac_sha256_v1
+
+synchronous_completion:
+  readback_value: exact_official_sdk_readback_return
+  synthetic_fixture_success: forbidden
+  classification: shared_guarded_completion_classifier
+  mismatch_or_absence: failed_unknown
+  failed_unknown_after_receipt: "null"
+  public_payload_projection: fixed_message_and_error_only
 
 preconditions:
   - canonical_target_is_contained_by_canonical_trusted_root
@@ -165,13 +174,59 @@ async_job_contract:
       exact_before_readback: failed_unchanged
       malformed_mismatched_or_unbounded_readback: failed_unknown
     receipt_digest_mismatch: failed_unknown
+    claim_fence:
+      persistence: durable_atomic_job_record
+      owner: adapter_secret_hmac_sha256_v1
+      generation: durable_monotonic_claim_generation
+      claimed_revision: completion_event_expected_revision
+      fence_revision: claimed_record_revision_plus_one
+      bindings:
+        - job_id
+        - job_generation
+        - operation_binding_sha256
+        - completion_event_id
+        - retained_guard_owner_and_generation
+      completion_cas: exact_latest_owner_generation_and_fence_revision
+      guard_recapture: immediately_before_terminal_cas
+      guard_release: only_after_terminal_cas_for_exact_claimed_guard
+      stale_foreign_or_replaced: reject_without_commit_or_guard_release
+    claim_schema:
+      $schema: https://json-schema.org/draft/2020-12/schema
+      type: object
+      required:
+        - claim_version
+        - job_id
+        - job_generation
+        - event_id
+        - operation_binding_sha256
+        - claim_owner
+        - claim_generation
+        - claimed_record_revision
+        - fence_revision
+        - retained_guard_owner
+        - retained_guard_generation
+      properties:
+        claim_version: {type: string, const: "1.0"}
+        job_id: {type: string, pattern: "^rj1-[0-9a-f]{64}$"}
+        job_generation: {type: string, pattern: "^[0-9a-f]{16}$"}
+        event_id: {type: string, pattern: "^rce1-[0-9a-f]{64}$"}
+        operation_binding_sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+        claim_owner: {type: string, pattern: "^rco1-[0-9a-f]{64}$"}
+        claim_generation: {type: string, pattern: "^[0-9a-f]{16}$"}
+        claimed_record_revision: {type: integer, minimum: 1}
+        fence_revision: {type: integer, minimum: 2}
+        retained_guard_owner: {type: string, pattern: "^rgo1-[0-9a-f]{64}$"}
+        retained_guard_generation: {type: string, pattern: "^[0-9a-f]{16}$"}
+      additionalProperties: false
     handles: released_after_terminal_readback
   transitions:
     synchronization: durable_store_compare_and_set_lock
     record_revision: strictly_monotonic_every_record_write
     event_sequence: strictly_monotonic_exact_event_order
     terminal_immutability: no_writes_after_terminal
-    readback_claim: exact_completion_event_single_owner_before_sdk_readback
+    readback_claim: durable_hmac_owner_generation_and_revision_fence
+    completion_commit: immediate_guard_recapture_then_exact_fence_terminal_cas
+    handle_release: after_terminal_cas_for_exact_claimed_guard_only
     readback: exactly_once_per_job
     duplicate_completion: return_existing_terminal_without_readback
     out_of_order_completion: reject_without_state_change

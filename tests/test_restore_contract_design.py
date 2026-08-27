@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import ntpath
+import secrets
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -1024,6 +1025,118 @@ def test_cancellation_after_terminal_is_ignored_without_mutating_terminal_record
     assert jobs.descriptor(job_id) == before
 
 
+def test_stale_late_readback_claim_cannot_commit_or_release_a_replaced_guard():
+    _, jobs, sdk, job_id = _pending_async_workflow()
+    event = jobs.make_completion_event(job_id, sdk.completion_receipt())
+    claim = jobs.claim_late_readback(event)
+    foreign_guard = FakeGuardedTargetBoundary()
+    foreign_token = foreign_guard.open()
+    with jobs.store.condition:
+        record = jobs._records[job_id]
+        original_guard = record["guard"]
+        jobs._advance(
+            record,
+            guard=foreign_guard,
+            guard_token=foreign_token,
+        )
+        replaced_revision = record["record_revision"]
+
+    with pytest.raises(RuntimeError, match="late completion fence rejected"):
+        jobs.complete_guarded_readback(claim, sdk.readback_after())
+
+    assert original_guard.release_count == 0
+    assert foreign_guard.release_count == 0
+    with jobs.store.condition:
+        assert jobs._records[job_id]["record_revision"] == replaced_revision
+        assert jobs._records[job_id]["status"] == "readback_in_progress"
+
+
+def test_forged_late_readback_claim_owner_cannot_commit_or_release_guard():
+    _, jobs, sdk, job_id = _pending_async_workflow()
+    event = jobs.make_completion_event(job_id, sdk.completion_receipt())
+    claim = jobs.claim_late_readback(event)
+    forged = dict(claim, claim_owner="rco1-" + "0" * 64)
+    with jobs.store.condition:
+        guard = jobs._records[job_id]["guard"]
+        revision = jobs._records[job_id]["record_revision"]
+
+    with pytest.raises(RuntimeError, match="late completion fence rejected"):
+        jobs.complete_guarded_readback(forged, sdk.readback_after())
+
+    assert guard.release_count == 0
+    with jobs.store.condition:
+        assert jobs._records[job_id]["record_revision"] == revision
+        assert jobs._records[job_id]["status"] == "readback_in_progress"
+
+
+@pytest.mark.parametrize(
+    "claim_update",
+    (
+        {"claimed_record_revision": None},
+        {"fence_revision": "7"},
+        {"retained_guard_generation": None},
+    ),
+)
+def test_malformed_late_readback_fence_fails_closed_without_releasing_guard(
+    claim_update,
+):
+    _, jobs, sdk, job_id = _pending_async_workflow()
+    event = jobs.make_completion_event(job_id, sdk.completion_receipt())
+    claim = jobs.claim_late_readback(event)
+    malformed = dict(claim, **claim_update)
+    with jobs.store.condition:
+        guard = jobs._records[job_id]["guard"]
+        revision = jobs._records[job_id]["record_revision"]
+
+    with pytest.raises(RuntimeError, match="late completion fence rejected"):
+        jobs.complete_guarded_readback(malformed, sdk.readback_after())
+
+    assert guard.release_count == 0
+    with jobs.store.condition:
+        assert jobs._records[job_id]["record_revision"] == revision
+        assert jobs._records[job_id]["status"] == "readback_in_progress"
+
+
+def test_late_readback_recaptures_guard_immediately_before_terminal_cas_and_release():
+    _, jobs, sdk, job_id = _pending_async_workflow()
+    event = jobs.make_completion_event(job_id, sdk.completion_receipt())
+    claim = jobs.claim_late_readback(event)
+    with jobs.store.condition:
+        guard = jobs._records[job_id]["guard"]
+        revision = jobs._records[job_id]["record_revision"]
+        guard.observed_change_phase = "late_readback_commit"
+        guard.attack_kind = "same_content"
+
+    with pytest.raises(RuntimeError, match="late completion fence rejected"):
+        jobs.complete_guarded_readback(claim, sdk.readback_after())
+
+    assert guard.recapture_count == 2
+    assert guard.release_count == 0
+    with jobs.store.condition:
+        assert jobs._records[job_id]["record_revision"] == revision
+        assert jobs._records[job_id]["status"] == "readback_in_progress"
+
+
+def test_exact_late_readback_claim_fence_survives_registry_restart():
+    _, jobs, sdk, job_id = _pending_async_workflow()
+    event = jobs.make_completion_event(job_id, sdk.completion_receipt())
+    claim = jobs.claim_late_readback(event)
+    with jobs.store.condition:
+        record = jobs._records[job_id]
+        guard = record["guard"]
+        assert record["readback_claim_owner"] == claim["claim_owner"]
+        assert record["readback_claim_generation"] == claim["claim_generation"]
+        assert record["readback_claim_record_revision"] == claim["claimed_record_revision"]
+        assert record["readback_claim_fence_revision"] == claim["fence_revision"]
+
+    restarted = FakeAsyncRestoreJobRegistry(jobs.store)
+    outcome = restarted.complete_guarded_readback(claim, sdk.readback_after())
+
+    assert outcome == "succeeded"
+    assert restarted.descriptor(job_id)["status"] == "terminal"
+    assert guard.release_count == 1
+
+
 def test_undispatched_terminal_record_rejects_every_late_transition_entrypoint():
     request = _request()
     confirmation_store = FakeTrustedConfirmationStore()
@@ -1371,6 +1484,87 @@ def _approved_after_receipt(request, resolver):
     return receipt
 
 
+def _completion_receipt_is_canonical(receipt):
+    try:
+        required_fields = {
+            "active_scene_observed_via",
+            "file_evidence_observed_via",
+            "file_name",
+            "file_size_bytes",
+            "sha256",
+            "scene_identity_fields",
+            "scene_identity_sha256",
+        }
+        if frozenset(receipt) not in {
+            frozenset(required_fields),
+            frozenset(required_fields | {"target_identity"}),
+        }:
+            return False
+        identity_fields = receipt["scene_identity_fields"]
+        if set(identity_fields) != {
+            "canonical_path_sha256",
+            "frame_count",
+            "scene_name",
+        }:
+            return False
+        _, identity_digest = _scene_identity_binding(identity_fields)
+        valid = (
+            receipt["active_scene_observed_via"] == "official_sdk"
+            and receipt["file_evidence_observed_via"] == "filesystem"
+            and receipt["scene_identity_sha256"] == identity_digest
+            and identity_fields["scene_name"] == receipt["file_name"]
+            and isinstance(receipt["file_name"], str)
+            and 0 < len(receipt["file_name"]) <= 255
+            and not {"/", "\\"}.intersection(receipt["file_name"])
+            and type(receipt["file_size_bytes"]) is int
+            and 0 < receipt["file_size_bytes"] <= 8_589_934_592
+            and isinstance(receipt["sha256"], str)
+            and len(receipt["sha256"]) == 64
+            and all(character in "0123456789abcdef" for character in receipt["sha256"])
+            and isinstance(identity_fields["canonical_path_sha256"], str)
+            and len(identity_fields["canonical_path_sha256"]) == 64
+            and type(identity_fields["frame_count"]) is int
+            and identity_fields["frame_count"] >= 0
+        )
+        target_identity = receipt.get("target_identity")
+        if target_identity is not None:
+            valid = valid and set(target_identity) == {
+                "canonical_path_sha256",
+                "volume_serial",
+                "file_id",
+            }
+        return valid
+    except (KeyError, TypeError):
+        return False
+
+
+def _classify_guarded_completion(
+    *,
+    before_receipt,
+    actual_receipt,
+    approved_recovery_receipt,
+    approved_target_identity,
+):
+    if not _completion_receipt_is_canonical(actual_receipt):
+        return "failed_unknown"
+    if actual_receipt == before_receipt:
+        return "failed_unchanged"
+    expected_target_members = {
+        "file_name": approved_recovery_receipt["file_name"],
+        "file_size_bytes": approved_recovery_receipt["file_size_bytes"],
+        "sha256": approved_recovery_receipt["sha256"],
+        "target_identity": approved_target_identity,
+    }
+    observed_target_members = {key: actual_receipt.get(key) for key in expected_target_members}
+    scene_path_matches = (
+        actual_receipt["scene_identity_fields"].get("canonical_path_sha256")
+        == approved_target_identity["canonical_path_sha256"]
+    )
+    if observed_target_members == expected_target_members and scene_path_matches:
+        return "succeeded"
+    return "failed_unknown"
+
+
 class FakeTrustedClock:
     def __init__(self, now=NOW_EPOCH_SECONDS):
         self._now = now
@@ -1560,10 +1754,13 @@ class FakeGuardedTargetBoundary:
         attack_kind=None,
     ):
         self._lock = Lock()
+        self._owner_secret = secrets.token_hex(32)
+        self._next_guard_generation = 1
         self.open_count = 0
         self.recapture_count = 0
         self.release_count = 0
         self._active_count = 0
+        self._active_generations = set()
         self.attempt_phase = attempt_phase
         self.observed_change_phase = observed_change_phase
         self.attack_kind = attack_kind
@@ -1586,8 +1783,13 @@ class FakeGuardedTargetBoundary:
         with self._lock:
             self.open_count += 1
             self._active_count += 1
+            guard_generation = f"{self._next_guard_generation:016x}"
+            self._next_guard_generation += 1
+            self._active_generations.add(guard_generation)
         return {
             "held": True,
+            "guard_owner": "rgo1-" + self._owner_secret,
+            "guard_generation": guard_generation,
             "dispatch_path": r"\\?\Volume{approved}\recovery\marked_take.vdf",
             "pinned_objects": self.PINNED_OBJECTS,
             "namespace_identity": {
@@ -1596,9 +1798,17 @@ class FakeGuardedTargetBoundary:
         }
 
     def recapture(self, token):
-        assert token["held"] is True
+        if not self.owns(token):
+            raise RuntimeError("guard ownership rejected")
         with self._lock:
             self.recapture_count += 1
+
+    def owns(self, token):
+        return (
+            token.get("held") is True
+            and token.get("guard_owner") == "rgo1-" + self._owner_secret
+            and token.get("guard_generation") in self._active_generations
+        )
 
     def checkpoint_identity(self, token, phase):
         assert token["held"] is True
@@ -1648,9 +1858,11 @@ class FakeGuardedTargetBoundary:
             return self._active_count == 0
 
     def release(self, token):
-        assert token["held"] is True
+        if not self.owns(token):
+            raise RuntimeError("guard ownership rejected")
         token["held"] = False
         with self._lock:
+            self._active_generations.remove(token["guard_generation"])
             self.release_count += 1
             self._active_count -= 1
 
@@ -1701,19 +1913,22 @@ class FakeRestoreWorkflow:
                 result["context"]["before_receipt"] = before_receipt
                 return result
             self.sdk.dispatch_restore(self.guard.dispatch_capability(guard_token))
-            self.sdk.readback_after()
-            result = _result("succeeded")
-            result["context"]["approved_target_identity"] = ticket["approved_target_identity"]
-            result["context"]["after_receipt"]["target_identity"] = ticket[
-                "approved_target_identity"
-            ]
-            after_identity_fields = result["context"]["after_receipt"]["scene_identity_fields"]
-            after_identity_fields["canonical_path_sha256"] = ticket["approved_target_identity"][
-                "canonical_path_sha256"
-            ]
-            result["context"]["after_receipt"]["scene_identity_sha256"] = _scene_identity_binding(
-                after_identity_fields
-            )[1]
+            actual_receipt = self.sdk.readback_after()
+            outcome = _classify_guarded_completion(
+                before_receipt=before_receipt,
+                actual_receipt=actual_receipt,
+                approved_recovery_receipt=request["recovery_receipt"],
+                approved_target_identity=ticket["approved_target_identity"],
+            )
+            result = _result(outcome)
+            result["context"]["approved_recovery_receipt"] = json.loads(
+                json.dumps(request["recovery_receipt"])
+            )
+            if outcome == "succeeded":
+                result["context"]["approved_target_identity"] = ticket["approved_target_identity"]
+                result["context"]["after_receipt"] = actual_receipt
+            elif outcome == "failed_unchanged":
+                result["context"]["after_receipt"] = actual_receipt
             result["context"]["before_receipt"] = before_receipt
             return result
         finally:
@@ -1724,6 +1939,8 @@ class FakeDurableJobStore:
     def __init__(self):
         self.condition = Condition(RLock())
         self._next_generation = 1
+        self._next_claim_generation = 1
+        self.claim_owner_secret = secrets.token_bytes(32)
         self.records = {}
         self.tombstones = {}
         self.reserved_job_ids = set()
@@ -1732,6 +1949,12 @@ class FakeDurableJobStore:
         with self.condition:
             generation = f"{self._next_generation:016x}"
             self._next_generation += 1
+            return generation
+
+    def reserve_claim_generation(self):
+        with self.condition:
+            generation = f"{self._next_claim_generation:016x}"
+            self._next_claim_generation += 1
             return generation
 
     def reserve_job_id(self, generation, sequence, operation_binding_sha256):
@@ -1759,6 +1982,12 @@ class FakeAsyncRestoreJobRegistry:
         "approved_target_identity",
         "before_receipt",
         "terminal_outcome",
+        "retained_guard_owner",
+        "retained_guard_generation",
+        "readback_claim_owner",
+        "readback_claim_generation",
+        "readback_claim_record_revision",
+        "readback_claim_fence_revision",
     }
 
     def __init__(self, durable_store=None):
@@ -1825,6 +2054,12 @@ class FakeAsyncRestoreJobRegistry:
                 "terminal_outcome": None,
                 "guard": None,
                 "guard_token": None,
+                "retained_guard_owner": None,
+                "retained_guard_generation": None,
+                "readback_claim_owner": None,
+                "readback_claim_generation": None,
+                "readback_claim_record_revision": None,
+                "readback_claim_fence_revision": None,
                 "completion_event": None,
             }
         return job_id
@@ -1911,6 +2146,8 @@ class FakeAsyncRestoreJobRegistry:
                 record,
                 guard=guard,
                 guard_token=guard_token,
+                retained_guard_owner=guard_token["guard_owner"],
+                retained_guard_generation=guard_token["guard_generation"],
                 handle_retention_owner="trusted_adapter_local_restore_job_registry",
             )
 
@@ -2047,6 +2284,27 @@ class FakeAsyncRestoreJobRegistry:
                 )
             return dict(record["completion_event"])
 
+    def _claim_owner_for(self, record, event, claim_generation, claimed_revision):
+        binding = {
+            "job_id": record["job_id"],
+            "job_generation": record["job_generation"],
+            "operation_binding_sha256": record["operation_binding_sha256"],
+            "event_id": event["event_id"],
+            "claim_generation": claim_generation,
+            "claimed_record_revision": claimed_revision,
+            "retained_guard_owner": record["retained_guard_owner"],
+            "retained_guard_generation": record["retained_guard_generation"],
+        }
+        canonical = json.dumps(binding, separators=(",", ":"), sort_keys=True).encode()
+        return (
+            "rco1-"
+            + hmac.new(
+                self.store.claim_owner_secret,
+                b"restore-readback-claim-v1\0" + canonical,
+                hashlib.sha256,
+            ).hexdigest()
+        )
+
     def claim_late_readback(self, event):
         claimed_job_id = event.get("job_id")
         with self.store.condition:
@@ -2074,114 +2332,102 @@ class FakeAsyncRestoreJobRegistry:
                 raise RuntimeError("completion event identity rejected")
             if record["status"] not in {"dispatch_uncertain", "awaiting_late_readback"}:
                 raise RuntimeError("completion event state rejected")
+            claimed_revision = record["record_revision"]
+            claim_generation = self.store.reserve_claim_generation()
+            claim_owner = self._claim_owner_for(
+                record,
+                event,
+                claim_generation,
+                claimed_revision,
+            )
+            fence_revision = claimed_revision + 1
             record["completion_event"] = dict(event)
             self._advance(
                 record,
                 status="readback_in_progress",
                 event_sequence=event["event_sequence"],
+                readback_claim_owner=claim_owner,
+                readback_claim_generation=claim_generation,
+                readback_claim_record_revision=claimed_revision,
+                readback_claim_fence_revision=fence_revision,
             )
+            assert record["record_revision"] == fence_revision
             return {
+                "claim_version": "1.0",
                 "job_id": record["job_id"],
+                "job_generation": record["job_generation"],
                 "event_id": event["event_id"],
                 "operation_binding_sha256": record["operation_binding_sha256"],
+                "claim_owner": claim_owner,
+                "claim_generation": claim_generation,
+                "claimed_record_revision": claimed_revision,
+                "fence_revision": fence_revision,
+                "retained_guard_owner": record["retained_guard_owner"],
+                "retained_guard_generation": record["retained_guard_generation"],
             }
 
     @staticmethod
     def _receipt_is_canonical(receipt):
-        try:
-            required_fields = {
-                "active_scene_observed_via",
-                "file_evidence_observed_via",
-                "file_name",
-                "file_size_bytes",
-                "sha256",
-                "scene_identity_fields",
-                "scene_identity_sha256",
-            }
-            if frozenset(receipt) not in {
-                frozenset(required_fields),
-                frozenset(required_fields | {"target_identity"}),
-            }:
-                return False
-            identity_fields = receipt["scene_identity_fields"]
-            if set(identity_fields) != {
-                "canonical_path_sha256",
-                "frame_count",
-                "scene_name",
-            }:
-                return False
-            _, identity_digest = _scene_identity_binding(identity_fields)
-            valid = (
-                receipt["active_scene_observed_via"] == "official_sdk"
-                and receipt["file_evidence_observed_via"] == "filesystem"
-                and receipt["scene_identity_sha256"] == identity_digest
-                and identity_fields["scene_name"] == receipt["file_name"]
-                and isinstance(receipt["file_name"], str)
-                and 0 < len(receipt["file_name"]) <= 255
-                and not {"/", "\\"}.intersection(receipt["file_name"])
-                and type(receipt["file_size_bytes"]) is int
-                and 0 < receipt["file_size_bytes"] <= 8_589_934_592
-                and isinstance(receipt["sha256"], str)
-                and len(receipt["sha256"]) == 64
-                and all(character in "0123456789abcdef" for character in receipt["sha256"])
-                and isinstance(identity_fields["canonical_path_sha256"], str)
-                and len(identity_fields["canonical_path_sha256"]) == 64
-                and type(identity_fields["frame_count"]) is int
-                and identity_fields["frame_count"] >= 0
-            )
-            target_identity = receipt.get("target_identity")
-            if target_identity is not None:
-                valid = valid and set(target_identity) == {
-                    "canonical_path_sha256",
-                    "volume_serial",
-                    "file_id",
-                }
-            return valid
-        except (KeyError, TypeError):
-            return False
+        return _completion_receipt_is_canonical(receipt)
 
     def _classify_completion(self, record, actual_receipt):
-        if not self._receipt_is_canonical(actual_receipt):
-            return "failed_unknown"
-        before_receipt = record["before_receipt"]
-        if actual_receipt == before_receipt:
-            return "failed_unchanged"
-        approved_receipt = record["approved_recovery_receipt"]
-        approved_target = record["approved_target_identity"]
-        expected_target_members = {
-            "file_name": approved_receipt["file_name"],
-            "file_size_bytes": approved_receipt["file_size_bytes"],
-            "sha256": approved_receipt["sha256"],
-            "target_identity": approved_target,
-        }
-        observed_target_members = {key: actual_receipt.get(key) for key in expected_target_members}
-        scene_path_matches = (
-            actual_receipt["scene_identity_fields"].get("canonical_path_sha256")
-            == approved_target["canonical_path_sha256"]
+        return _classify_guarded_completion(
+            before_receipt=record["before_receipt"],
+            actual_receipt=actual_receipt,
+            approved_recovery_receipt=record["approved_recovery_receipt"],
+            approved_target_identity=record["approved_target_identity"],
         )
-        if observed_target_members == expected_target_members and scene_path_matches:
-            return "succeeded"
-        return "failed_unknown"
+
+    def _claim_fence_matches(self, record, claim, event):
+        expected_owner = self._claim_owner_for(
+            record,
+            event,
+            claim.get("claim_generation"),
+            claim.get("claimed_record_revision"),
+        )
+        return (
+            claim.get("claim_version") == "1.0"
+            and record["status"] == "readback_in_progress"
+            and record["job_id"] == claim.get("job_id")
+            and record["job_generation"] == claim.get("job_generation")
+            and record["operation_binding_sha256"] == claim.get("operation_binding_sha256")
+            and event["event_id"] == claim.get("event_id")
+            and record["record_revision"] == claim.get("fence_revision")
+            and record["readback_claim_owner"] == claim.get("claim_owner")
+            and record["readback_claim_generation"] == claim.get("claim_generation")
+            and record["readback_claim_record_revision"] == claim.get("claimed_record_revision")
+            and record["readback_claim_fence_revision"] == claim.get("fence_revision")
+            and claim.get("fence_revision") == claim.get("claimed_record_revision") + 1
+            and record["retained_guard_owner"] == claim.get("retained_guard_owner")
+            and record["retained_guard_generation"] == claim.get("retained_guard_generation")
+            and claim.get("claim_owner") == expected_owner
+        )
 
     def complete_guarded_readback(self, claim, actual_receipt):
         with self.store.condition:
             record = self._records[claim["job_id"]]
             event = record["completion_event"]
-            if (
-                record["status"] != "readback_in_progress"
-                or event["event_id"] != claim["event_id"]
-                or record["operation_binding_sha256"] != claim["operation_binding_sha256"]
-            ):
-                raise RuntimeError("late completion claim rejected")
+            if event is None or not self._claim_fence_matches(record, claim, event):
+                raise RuntimeError("late completion fence rejected")
             guard = record["guard"]
             guard_token = record["guard_token"]
-            if guard is None or guard_token is None:
-                raise RuntimeError("late completion handle ownership rejected")
+            if (
+                guard is None
+                or guard_token is None
+                or not guard.owns(guard_token)
+                or guard_token["guard_owner"] != claim["retained_guard_owner"]
+                or guard_token["guard_generation"] != claim["retained_guard_generation"]
+            ):
+                raise RuntimeError("late completion fence rejected")
+            guard.recapture(guard_token)
+            if not guard.checkpoint_identity(guard_token, "late_readback_commit"):
+                raise RuntimeError("late completion fence rejected")
+            if not self._claim_fence_matches(record, claim, event):
+                raise RuntimeError("late completion fence rejected")
             _, actual_receipt_digest = _completion_receipt_binding(actual_receipt)
             outcome = self._classify_completion(record, actual_receipt)
             if actual_receipt_digest != event["completion_receipt_sha256"]:
                 outcome = "failed_unknown"
-            guard.release(guard_token)
             succeeded_or_unchanged = outcome in {"succeeded", "failed_unchanged"}
             self._advance(
                 record,
@@ -2213,6 +2459,7 @@ class FakeAsyncRestoreJobRegistry:
                 guard=None,
                 guard_token=None,
             )
+            guard.release(guard_token)
             self._write_tombstone(record)
             self.store.condition.notify_all()
             return outcome
@@ -2350,7 +2597,7 @@ class FakeAsyncRestoreWorkflow:
 def test_restore_contract_is_design_only_and_fail_closed():
     contract = _contract()
 
-    assert contract["contract_version"] == "1.7"
+    assert contract["contract_version"] == "1.8"
     assert contract["status"] == "proposed-design-only"
     assert contract["implementation_authorized"] is False
     assert contract["operation"] == {
@@ -2744,6 +2991,52 @@ def test_concurrent_restore_workflows_consume_and_dispatch_exactly_once():
     assert loser_result["context"]["dispatch_performed"] is False
     assert loser_result["context"]["confirmation_consumed"] is False
     assert loser_result["context"]["effect"] == "unknown"
+
+
+def test_synchronous_restore_uses_actual_readback_and_rejects_mismatched_sha():
+    request = _request()
+    store = FakeTrustedConfirmationStore()
+    store.issue(request, authenticated=True)
+    mismatched_readback = _approved_after_receipt(request, store.resolver)
+    mismatched_readback["sha256"] = "f" * 64
+    sdk = FakeOfficialSdkBoundary(after_receipt=mismatched_readback)
+    workflow = FakeRestoreWorkflow(
+        store,
+        sdk,
+        FakeGuardedTargetBoundary(),
+        Barrier(1),
+    )
+
+    result = workflow.execute(request)
+
+    _validate_result(result)
+    assert result["context"]["state"] == "failed_unknown"
+    assert result["context"]["after_receipt"] is None
+    assert "f" * 64 not in json.dumps(result, sort_keys=True)
+    assert store.consume_count == sdk.dispatch_count == sdk.readback_count == 1
+
+
+def test_synchronous_restore_without_actual_readback_fails_unknown_without_payload():
+    request = _request()
+    store = FakeTrustedConfirmationStore()
+    store.issue(request, authenticated=True)
+    sdk = FakeOfficialSdkBoundary()
+    sdk.after_receipt = None
+    workflow = FakeRestoreWorkflow(
+        store,
+        sdk,
+        FakeGuardedTargetBoundary(),
+        Barrier(1),
+    )
+
+    result = workflow.execute(request)
+
+    _validate_result(result)
+    assert result["context"]["state"] == "failed_unknown"
+    assert result["context"]["after_receipt"] is None
+    assert result["message"] == "Recovery scene restore did not reach verified success."
+    assert result["error"] == "RestoreFailedUnknown"
+    assert store.consume_count == sdk.dispatch_count == sdk.readback_count == 1
 
 
 @pytest.mark.parametrize("phase", ("preflight", "recapture", "cas"))
@@ -3277,6 +3570,14 @@ def test_contract_records_semantic_gates_not_expressible_in_json_schema():
         "requires_explicit_approved_path_scope": True,
         "requires_separate_operator_authorization": True,
     }
+    assert contract["synchronous_completion"] == {
+        "readback_value": "exact_official_sdk_readback_return",
+        "synthetic_fixture_success": "forbidden",
+        "classification": "shared_guarded_completion_classifier",
+        "mismatch_or_absence": "failed_unknown",
+        "failed_unknown_after_receipt": "null",
+        "public_payload_projection": "fixed_message_and_error_only",
+    }
 
 
 def test_contract_freezes_public_text_and_exact_async_job_ownership():
@@ -3312,6 +3613,7 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
             "raw_scene_and_take_names",
             "full_before_after_and_recovery_receipts",
             "raw_sdk_and_internal_diagnostics",
+            "durable_readback_claim_fence",
         ],
         "public_projection": "adapter_secret_hmac_sha256_v1",
     }
@@ -3399,6 +3701,70 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
             "malformed_mismatched_or_unbounded_readback": "failed_unknown",
         },
         "receipt_digest_mismatch": "failed_unknown",
+        "claim_fence": {
+            "persistence": "durable_atomic_job_record",
+            "owner": "adapter_secret_hmac_sha256_v1",
+            "generation": "durable_monotonic_claim_generation",
+            "claimed_revision": "completion_event_expected_revision",
+            "fence_revision": "claimed_record_revision_plus_one",
+            "bindings": [
+                "job_id",
+                "job_generation",
+                "operation_binding_sha256",
+                "completion_event_id",
+                "retained_guard_owner_and_generation",
+            ],
+            "completion_cas": "exact_latest_owner_generation_and_fence_revision",
+            "guard_recapture": "immediately_before_terminal_cas",
+            "guard_release": "only_after_terminal_cas_for_exact_claimed_guard",
+            "stale_foreign_or_replaced": "reject_without_commit_or_guard_release",
+        },
+        "claim_schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "required": [
+                "claim_version",
+                "job_id",
+                "job_generation",
+                "event_id",
+                "operation_binding_sha256",
+                "claim_owner",
+                "claim_generation",
+                "claimed_record_revision",
+                "fence_revision",
+                "retained_guard_owner",
+                "retained_guard_generation",
+            ],
+            "properties": {
+                "claim_version": {"type": "string", "const": "1.0"},
+                "job_id": {"type": "string", "pattern": "^rj1-[0-9a-f]{64}$"},
+                "job_generation": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+                "event_id": {"type": "string", "pattern": "^rce1-[0-9a-f]{64}$"},
+                "operation_binding_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                },
+                "claim_owner": {
+                    "type": "string",
+                    "pattern": "^rco1-[0-9a-f]{64}$",
+                },
+                "claim_generation": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{16}$",
+                },
+                "claimed_record_revision": {"type": "integer", "minimum": 1},
+                "fence_revision": {"type": "integer", "minimum": 2},
+                "retained_guard_owner": {
+                    "type": "string",
+                    "pattern": "^rgo1-[0-9a-f]{64}$",
+                },
+                "retained_guard_generation": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{16}$",
+                },
+            },
+            "additionalProperties": False,
+        },
         "handles": "released_after_terminal_readback",
     }
     assert async_contract["transitions"] == {
@@ -3406,12 +3772,32 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
         "record_revision": "strictly_monotonic_every_record_write",
         "event_sequence": "strictly_monotonic_exact_event_order",
         "terminal_immutability": "no_writes_after_terminal",
-        "readback_claim": "exact_completion_event_single_owner_before_sdk_readback",
+        "readback_claim": "durable_hmac_owner_generation_and_revision_fence",
+        "completion_commit": "immediate_guard_recapture_then_exact_fence_terminal_cas",
+        "handle_release": "after_terminal_cas_for_exact_claimed_guard_only",
         "readback": "exactly_once_per_job",
         "duplicate_completion": "return_existing_terminal_without_readback",
         "out_of_order_completion": "reject_without_state_change",
         "stale_snapshot_publication": "reject_against_latest_durable_revision",
     }
+
+
+def test_late_readback_claim_has_a_strict_private_schema_and_revision_fence():
+    _, jobs, sdk, job_id = _pending_async_workflow()
+    event = jobs.make_completion_event(job_id, sdk.completion_receipt())
+    claim = jobs.claim_late_readback(event)
+    schema = _contract()["async_job_contract"]["late_completion"]["claim_schema"]
+
+    Draft202012Validator.check_schema(schema)
+    Draft202012Validator(schema).validate(claim)
+    assert claim["fence_revision"] == claim["claimed_record_revision"] + 1
+    for invalid in (
+        dict(claim, claim_owner="foreign-owner"),
+        dict(claim, claim_generation="1"),
+        dict(claim, retained_guard_owner="operator-name"),
+    ):
+        with pytest.raises(ValidationError):
+            Draft202012Validator(schema).validate(invalid)
 
 
 def test_dispatch_uncertain_has_strict_private_and_public_status_schemas():
@@ -3494,6 +3880,14 @@ def test_adr_preserves_the_design_only_acceptance_boundary():
         "SDK transaction or idempotency",
         "completion-receipt digest",
         "failed unknown",
+        "exact value returned by the official SDK",
+        "must never synthesize success",
+        "durable read-back claim owner",
+        "claim generation",
+        "fence revision",
+        "immediately recapture",
+        "foreign or replaced",
+        "after the terminal CAS",
         "8 GiB",
         "streaming SHA-256",
         "64 KiB",

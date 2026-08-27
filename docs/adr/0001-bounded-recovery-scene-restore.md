@@ -242,13 +242,19 @@ before/after terminal receipt or explicit unknown effect
   record revision, next event sequence, terminal source, and completion-receipt
   digest derived from the actual official-SDK completion observation. Its exact
   event ID and canonical digest are checked before one caller can claim SDK
-  read-back ownership. That owner performs a fresh official-SDK scene read-back
-  plus guarded filesystem receipt capture and revalidates the job generation,
-  operation binding, confirmation, approved target, canonical scene-identity
-  digest, and event receipt digest. An approved distinct read-back succeeds; an
-  exact before receipt is failed unchanged; malformed, unbounded, wrong-target,
-  wrong-digest, or event/read-back mismatch is failed unknown. Repeated polling of either pending or
-  terminal state cannot increment the dispatch count.
+  read-back ownership. The durable read-back claim owner is an adapter-secret
+  HMAC over the job, event, operation, retained guard, durable claim generation,
+  claimed record revision, and next fence revision. That owner performs a fresh
+  official-SDK scene read-back plus guarded filesystem receipt capture and
+  revalidates every binding. Immediately before the terminal commit it must
+  immediately recapture the exact retained guard, then CAS the exact current
+  owner, claim generation, and fence revision. A stale, foreign or replaced
+  claim or guard fails closed without committing and without releasing another
+  owner's guard; the exact claimed guard is released only after the terminal CAS.
+  An approved distinct read-back succeeds; an exact before receipt is failed
+  unchanged; malformed, unbounded, wrong-target, wrong-digest, or event/read-back
+  mismatch is failed unknown. Repeated polling of either pending or terminal
+  state cannot increment the dispatch count.
 - Every durable record write uses the registry CAS lock, increments a strictly
   monotonic `record_revision`, and consumes only the next `event_sequence`.
   Terminal records are immutable. Concurrent duplicate completion events share
@@ -270,6 +276,12 @@ before/after terminal receipt or explicit unknown effect
   construct success from a status flag: the guarded read-back receipt itself
   must match the exact completion-receipt digest and all confirmation/job/target
   bindings.
+- Synchronous completion uses the exact value returned by the official SDK
+  read-back and the same guarded completion classifier as late completion. It
+  must never synthesize success from approved or fixture receipt values. An
+  absent, malformed, mismatched, or unverifiable actual read-back terminates as
+  stable `failed_unknown`, publishes a null after receipt and fixed public
+  message/error only, and keeps the raw observation in private audit data.
 - `scene_identity_sha256` is not an opaque implementation choice. Treat
   `GetSceneName` as an exact two-string `(scene_path, name-or-path)` tuple. For a
   saved scene, `scene_path` is an absolute Windows directory. If the second
