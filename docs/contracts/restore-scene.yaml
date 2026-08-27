@@ -1,4 +1,4 @@
-contract_version: "1.4"
+contract_version: "1.5"
 status: proposed-design-only
 implementation_authorized: false
 
@@ -11,6 +11,13 @@ operation:
   route: official_sdk_only
 
 prohibited_routes: [arbitrary_hsl, python, ui_automation]
+
+public_output_policy:
+  message_source: fixed_state_constants_only
+  prompt: always_null
+  prohibited_public_text: [full_paths, raw_exceptions, sdk_result_text, confirmation_secrets]
+  schema_enforcement: branch_specific_message_const_and_null_prompt
+  internal_diagnostics: operator_owned_sink_outside_public_result
 
 preconditions:
   - canonical_target_is_contained_by_canonical_trusted_root
@@ -25,6 +32,60 @@ terminal_rules:
   timeout_state: timed_out
   unknown_state: indeterminate
   timeout_or_unknown_effect: unknown
+
+async_job_contract:
+  owner: trusted_adapter_local_restore_job_registry
+  create_record: before_host_connection_and_dispatch
+  result_member: context.job
+  exact_operation_binding:
+    algorithm: nfc_sorted_compact_json_sha256_v1
+    members:
+      - request_id
+      - confirmation_id
+      - confirmation_revision
+      - canonical_trusted_root_sha256
+      - canonical_path_sha256
+      - target_volume_serial
+      - target_file_id
+      - recovery_receipt_binding_sha256
+  jobs_get_status_input_schema:
+    $schema: https://json-schema.org/draft/2020-12/schema
+    type: object
+    required: [job_id]
+    properties:
+      job_id:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    additionalProperties: false
+  status_lookup: trusted_record_by_exact_job_id
+  poll_may_dispatch: false
+  retry_may_dispatch: false
+  max_dispatch_count_per_job: 1
+  cancellation:
+    before_dispatch:
+      disposition: honored_before_dispatch
+      confirmation_consumed: false
+      dispatch_count: 0
+      handles: released_before_dispatch
+      terminal_source: cancellation_before_dispatch
+    after_dispatch:
+      disposition: requested_after_dispatch_operation_continues
+      dispatch_count: 1
+      handles: retained_by_trusted_adapter_local_restore_job_registry
+      next_step: poll_exact_job_without_redispatch
+  handle_ownership:
+    transfer: request_scope_to_trusted_adapter_local_restore_job_registry_before_dispatch
+    retain_after_dispatch: through_late_official_sdk_readback_or_terminal_unknown_effect
+    release_before_dispatch: cancellation_or_guard_rejection
+    release_after_dispatch: only_after_terminal_readback_or_terminal_unknown_effect
+  late_completion:
+    correlation: exact_job_id_and_operation_binding_sha256
+    polling: jobs_get_status_never_redispatches
+    success_source: official_sdk_readback
+    result_state: succeeded
+    handles: released_after_terminal_readback
 
 real_host_acceptance:
   authorized_by_this_contract: false
@@ -442,6 +503,165 @@ output_schema:
         - {$ref: "#/$defs/scene_receipt"}
         - type: object
           required: [target_identity]
+    job_descriptor:
+      type: object
+      required:
+        - job_id
+        - request_id
+        - operation
+        - operation_binding_sha256
+        - owner
+        - status_tool
+        - status
+        - snapshot_source
+        - terminal_source
+        - cancellation_disposition
+        - handle_retention_owner
+        - dispatch_count
+        - poll_allowed
+        - duplicate_execution_allowed
+        - late_completion_disposition
+      properties:
+        job_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        request_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        operation: {type: string, const: restore_scene}
+        operation_binding_sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+        owner: {type: string, const: trusted_adapter_local_restore_job_registry}
+        status_tool: {type: string, const: jobs_get_status}
+        status:
+          type: string
+          enum: [terminal_not_dispatched, awaiting_late_readback, terminal]
+        snapshot_source:
+          type: string
+          enum:
+            - preflight
+            - confirmation_cas
+            - target_guard
+            - official_sdk_readback
+            - official_sdk_failure
+            - request_timeout
+            - transport_loss
+            - cancellation_before_dispatch
+            - cancellation_after_dispatch
+            - late_official_sdk_readback
+        terminal_source:
+          type: [string, "null"]
+          enum:
+            - preflight
+            - confirmation_cas
+            - target_guard
+            - official_sdk_readback
+            - official_sdk_failure
+            - cancellation_before_dispatch
+            - null
+        cancellation_disposition:
+          type: string
+          enum:
+            - not_requested
+            - honored_before_dispatch
+            - requested_after_dispatch_operation_continues
+        handle_retention_owner:
+          type: string
+          enum:
+            - released_before_dispatch
+            - trusted_adapter_local_restore_job_registry
+            - released_after_terminal_readback
+            - released_after_terminal_unknown
+        dispatch_count: {type: integer, minimum: 0, maximum: 1}
+        poll_allowed: {type: boolean}
+        duplicate_execution_allowed: {type: boolean, const: false}
+        late_completion_disposition:
+          type: string
+          enum:
+            - not_applicable
+            - poll_exact_job_without_redispatch
+            - terminalized_by_official_sdk_readback
+    pending_job_descriptor:
+      allOf:
+        - {$ref: "#/$defs/job_descriptor"}
+        - type: object
+          properties:
+            status: {type: string, const: awaiting_late_readback}
+            snapshot_source:
+              type: string
+              enum: [request_timeout, transport_loss, cancellation_after_dispatch]
+            terminal_source: {type: "null"}
+            cancellation_disposition:
+              type: string
+              enum: [not_requested, requested_after_dispatch_operation_continues]
+            handle_retention_owner:
+              type: string
+              const: trusted_adapter_local_restore_job_registry
+            dispatch_count: {type: integer, const: 1}
+            poll_allowed: {type: boolean, const: true}
+            late_completion_disposition:
+              type: string
+              const: poll_exact_job_without_redispatch
+      unevaluatedProperties: false
+    undispatched_job_descriptor:
+      allOf:
+        - {$ref: "#/$defs/job_descriptor"}
+        - type: object
+          properties:
+            status: {type: string, const: terminal_not_dispatched}
+            snapshot_source:
+              type: string
+              enum: [preflight, confirmation_cas, target_guard, cancellation_before_dispatch]
+            terminal_source:
+              type: string
+              enum: [preflight, confirmation_cas, target_guard, cancellation_before_dispatch]
+            cancellation_disposition:
+              type: string
+              enum: [not_requested, honored_before_dispatch]
+            handle_retention_owner: {type: string, const: released_before_dispatch}
+            dispatch_count: {type: integer, const: 0}
+            poll_allowed: {type: boolean, const: false}
+            late_completion_disposition: {type: string, const: not_applicable}
+      unevaluatedProperties: false
+    terminal_readback_job_descriptor:
+      allOf:
+        - {$ref: "#/$defs/job_descriptor"}
+        - type: object
+          properties:
+            status: {type: string, const: terminal}
+            snapshot_source:
+              type: string
+              enum: [official_sdk_readback, late_official_sdk_readback]
+            terminal_source: {type: string, const: official_sdk_readback}
+            cancellation_disposition:
+              type: string
+              enum: [not_requested, requested_after_dispatch_operation_continues]
+            handle_retention_owner: {type: string, const: released_after_terminal_readback}
+            dispatch_count: {type: integer, const: 1}
+            poll_allowed: {type: boolean, const: false}
+            late_completion_disposition:
+              type: string
+              enum: [not_applicable, terminalized_by_official_sdk_readback]
+      unevaluatedProperties: false
+    terminal_unknown_job_descriptor:
+      allOf:
+        - {$ref: "#/$defs/job_descriptor"}
+        - type: object
+          properties:
+            status: {type: string, const: terminal}
+            snapshot_source: {type: string, const: official_sdk_failure}
+            terminal_source: {type: string, const: official_sdk_failure}
+            cancellation_disposition:
+              type: string
+              enum: [not_requested, requested_after_dispatch_operation_continues]
+            handle_retention_owner: {type: string, const: released_after_terminal_unknown}
+            dispatch_count: {type: integer, const: 1}
+            poll_allowed: {type: boolean, const: false}
+            late_completion_disposition: {type: string, const: not_applicable}
+      unevaluatedProperties: false
     preflight_rejected_context:
       type: object
       required:
@@ -456,6 +676,7 @@ output_schema:
         - failed_precondition
         - before_receipt
         - after_receipt
+        - job
       properties:
         receipt_version: {type: string, const: "1.0"}
         request_id:
@@ -477,8 +698,10 @@ output_schema:
             - target_basename_size_and_sha256_match_recovery_receipt
             - recovery_receipt_reports_active_scene_unchanged
             - operator_confirmation_is_fresh_exact_scope_and_unused
+            - cancellation_requested_before_dispatch
         before_receipt: {type: "null"}
         after_receipt: {type: "null"}
+        job: {$ref: "#/$defs/undispatched_job_descriptor"}
       additionalProperties: false
     confirmation_consume_rejected_context:
       type: object
@@ -495,6 +718,7 @@ output_schema:
         - consume_outcome
         - before_receipt
         - after_receipt
+        - job
       properties:
         receipt_version: {type: string, const: "1.0"}
         request_id:
@@ -512,6 +736,7 @@ output_schema:
         consume_outcome: {type: string, const: lost_atomic_compare_and_set}
         before_receipt: {$ref: "#/$defs/scene_receipt"}
         after_receipt: {type: "null"}
+        job: {$ref: "#/$defs/undispatched_job_descriptor"}
       additionalProperties: false
     target_guard_rejected_context:
       type: object
@@ -528,6 +753,7 @@ output_schema:
         - guard_outcome
         - before_receipt
         - after_receipt
+        - job
       properties:
         receipt_version: {type: string, const: "1.0"}
         request_id:
@@ -545,6 +771,7 @@ output_schema:
         guard_outcome: {type: string, const: predispatch_identity_or_receipt_mismatch}
         before_receipt: {$ref: "#/$defs/scene_receipt"}
         after_receipt: {type: "null"}
+        job: {$ref: "#/$defs/undispatched_job_descriptor"}
       additionalProperties: false
     dispatched_context:
       type: object
@@ -560,6 +787,7 @@ output_schema:
         - readback_performed
         - before_receipt
         - after_receipt
+        - job
       properties:
         receipt_version: {type: string, const: "1.0"}
         request_id:
@@ -581,6 +809,7 @@ output_schema:
           oneOf:
             - {$ref: "#/$defs/scene_receipt"}
             - {type: "null"}
+        job: {$ref: "#/$defs/job_descriptor"}
     succeeded_context:
       allOf:
         - {$ref: "#/$defs/dispatched_context"}
@@ -605,6 +834,7 @@ output_schema:
                 after_matches_guarded_confirmation_identity: {type: boolean, const: true}
               additionalProperties: false
             after_receipt: {$ref: "#/$defs/guarded_scene_receipt"}
+            job: {$ref: "#/$defs/terminal_readback_job_descriptor"}
       unevaluatedProperties: false
     failed_unchanged_context:
       allOf:
@@ -623,6 +853,7 @@ output_schema:
                 before_after_equal: {type: boolean, const: true}
               additionalProperties: false
             after_receipt: {$ref: "#/$defs/scene_receipt"}
+            job: {$ref: "#/$defs/terminal_readback_job_descriptor"}
       unevaluatedProperties: false
     failed_unknown_context:
       allOf:
@@ -633,6 +864,7 @@ output_schema:
             effect: {type: string, const: unknown}
             readback_performed: {type: boolean, const: false}
             after_receipt: {type: "null"}
+            job: {$ref: "#/$defs/terminal_unknown_job_descriptor"}
       unevaluatedProperties: false
     unknown_effect_context:
       allOf:
@@ -643,14 +875,15 @@ output_schema:
             effect: {type: string, const: unknown}
             readback_performed: {type: boolean, const: false}
             after_receipt: {type: "null"}
+            job: {$ref: "#/$defs/pending_job_descriptor"}
       unevaluatedProperties: false
   oneOf:
     - type: object
       required: [success, message, prompt, error, context]
       properties:
         success: {type: boolean, const: false}
-        message: {type: string}
-        prompt: {type: [string, "null"]}
+        message: {type: string, const: Recovery scene restore rejected before host connection.}
+        prompt: {type: "null"}
         error: {type: string, const: RestorePreflightRejected}
         context: {$ref: "#/$defs/preflight_rejected_context"}
       additionalProperties: false
@@ -658,8 +891,8 @@ output_schema:
       required: [success, message, prompt, error, context]
       properties:
         success: {type: boolean, const: false}
-        message: {type: string}
-        prompt: {type: [string, "null"]}
+        message: {type: string, const: Confirmation was consumed by a concurrent request before dispatch.}
+        prompt: {type: "null"}
         error: {type: string, const: RestoreConfirmationConsumeRejected}
         context: {$ref: "#/$defs/confirmation_consume_rejected_context"}
       additionalProperties: false
@@ -667,8 +900,8 @@ output_schema:
       required: [success, message, prompt, error, context]
       properties:
         success: {type: boolean, const: false}
-        message: {type: string}
-        prompt: {type: [string, "null"]}
+        message: {type: string, const: Guarded target identity could not be reconfirmed before dispatch.}
+        prompt: {type: "null"}
         error: {type: string, const: RestoreTargetGuardRejected}
         context: {$ref: "#/$defs/target_guard_rejected_context"}
       additionalProperties: false
@@ -676,8 +909,8 @@ output_schema:
       required: [success, message, prompt, error, context]
       properties:
         success: {type: boolean, const: true}
-        message: {type: string}
-        prompt: {type: [string, "null"]}
+        message: {type: string, const: Recovery scene restore verified.}
+        prompt: {type: "null"}
         error: {type: "null"}
         context: {$ref: "#/$defs/succeeded_context"}
       additionalProperties: false
@@ -685,8 +918,8 @@ output_schema:
       required: [success, message, prompt, error, context]
       properties:
         success: {type: boolean, const: false}
-        message: {type: string}
-        prompt: {type: [string, "null"]}
+        message: {type: string, const: Recovery scene restore failed without changing the active scene.}
+        prompt: {type: "null"}
         error: {type: string, const: RestoreFailedUnchanged}
         context: {$ref: "#/$defs/failed_unchanged_context"}
       additionalProperties: false
@@ -694,8 +927,8 @@ output_schema:
       required: [success, message, prompt, error, context]
       properties:
         success: {type: boolean, const: false}
-        message: {type: string}
-        prompt: {type: [string, "null"]}
+        message: {type: string, const: Recovery scene restore did not reach verified success.}
+        prompt: {type: "null"}
         error: {type: string, const: RestoreFailedUnknown}
         context: {$ref: "#/$defs/failed_unknown_context"}
       additionalProperties: false
@@ -703,8 +936,8 @@ output_schema:
       required: [success, message, prompt, error, context]
       properties:
         success: {type: boolean, const: false}
-        message: {type: string}
-        prompt: {type: [string, "null"]}
+        message: {type: string, const: Recovery scene restore did not reach verified success.}
+        prompt: {type: "null"}
         error: {type: string, const: RestoreTimedOut}
         context:
           allOf:
@@ -716,8 +949,8 @@ output_schema:
       required: [success, message, prompt, error, context]
       properties:
         success: {type: boolean, const: false}
-        message: {type: string}
-        prompt: {type: [string, "null"]}
+        message: {type: string, const: Recovery scene restore did not reach verified success.}
+        prompt: {type: "null"}
         error: {type: string, const: RestoreIndeterminate}
         context:
           allOf:
@@ -726,7 +959,15 @@ output_schema:
                 state: {type: string, const: indeterminate}
       additionalProperties: false
 
-result_validation_pipeline: [draft2020_schema, semantic_postconditions, scene_identity_digest]
+result_validation_pipeline:
+  - draft2020_schema
+  - semantic_invariants
+  - semantic_postconditions
+  - scene_identity_digest
+
+semantic_invariants:
+  equal:
+    - [/context/job/request_id, /context/request_id]
 
 scene_receipt_validation:
   apply_to: [before_receipt, after_receipt]

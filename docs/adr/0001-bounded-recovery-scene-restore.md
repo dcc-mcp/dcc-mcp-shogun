@@ -162,6 +162,30 @@ before/after terminal receipt or explicit unknown effect
   official SDK. Arbitrary HSL, Python, UI automation, generic command text,
   script paths, and fallback routing remain prohibited.
 
+### Asynchronous job ownership
+
+- Create an immutable record in the trusted adapter-local restore job registry
+  before host connection or dispatch. Its operation-binding digest covers the
+  request ID, confirmation ID and revision, trusted-root and target identity,
+  and recovery-receipt digest. Public results expose only the bounded job ID,
+  request ID, operation name, binding digest, lifecycle enums, and counters;
+  confirmation material and paths stay inside the trusted registry.
+- `jobs_get_status` accepts only one exact `job_id`. It performs a trusted
+  registry lookup and never dispatches, retries, or reconstructs the restore
+  request. Every result binds `context.request_id` to the job's request ID, and
+  a job permits at most one dispatch for its lifetime.
+- For cancellation before dispatch, terminate the job without host connection,
+  confirmation consumption, or SDK dispatch and release any request-owned
+  handles. For cancellation after dispatch, do not abort, retry, or claim a
+  terminal effect: the operation continues under the same job, polling remains
+  available, and the registry retains the full pinned handle chain.
+- Timeout and transport loss after dispatch have the same non-replay boundary.
+  They report a null terminal source and transfer handle-retention ownership to
+  the registry. A late official SDK read-back may terminalize only that exact
+  job and operation binding; only then may it report success and release the
+  retained handles. Repeated polling of either pending or terminal state cannot
+  increment the dispatch count.
+
 ### Terminal state and receipts
 
 - Capture a bounded `before_receipt` through the official SDK before consuming
@@ -204,15 +228,18 @@ before/after terminal receipt or explicit unknown effect
 - `failed_unknown` requires `effect=unknown`, no claimed read-back, and a null
   after receipt. It cannot inherit the evidence privileges of
   `failed_unchanged`.
-- `timed_out` and `indeterminate` are terminal unknown-effect states. After the
-  single dispatch, callers may poll status or inspect state, but must never
+- `timed_out` and `indeterminate` terminate the request call with unknown effect,
+  while the correlated adapter job remains pending for a terminal source. After
+  the single dispatch, callers may poll status or inspect state, but must never
   replay the mutation or reuse the confirmation.
 - Results must retain the repository's bounded success/failure envelope and
-  exclude full paths, raw exception messages, SDK result text, and operator
-  confirmation secrets. Validation is a mandatory two-stage pipeline: first the
-  Draft 2020-12 schema, then the JSON-pointer `semantic_postconditions`.
-  Structural schema validation alone is insufficient because standard JSON
-  Schema cannot compare two dynamic receipt values.
+  use fixed state-specific public messages with `prompt=null`. Full paths, raw
+  exception messages, SDK result text, and operator confirmation secrets are
+  forbidden in every branch; detailed diagnostics belong only in an
+  operator-owned internal sink. Validation applies the Draft 2020-12 schema,
+  global JSON-pointer semantic invariants, state `semantic_postconditions`, and
+  scene-identity digest checks. Structural schema validation alone is
+  insufficient because standard JSON Schema cannot compare dynamic values.
 
 ## Real-host acceptance boundary
 

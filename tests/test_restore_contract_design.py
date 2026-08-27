@@ -65,6 +65,75 @@ def _scene_receipt(file_name: str, canonical_path_digest: str, file_digest: str)
     }
 
 
+def _job_descriptor(
+    *,
+    status="awaiting_late_readback",
+    snapshot_source="request_timeout",
+    terminal_source=None,
+    cancellation_disposition="not_requested",
+    handle_retention_owner="trusted_adapter_local_restore_job_registry",
+    dispatch_count=1,
+    poll_allowed=True,
+    late_completion_disposition="poll_exact_job_without_redispatch",
+):
+    return {
+        "job_id": "restore-job-0001",
+        "request_id": "restore-0001",
+        "operation": "restore_scene",
+        "operation_binding_sha256": "e" * 64,
+        "owner": "trusted_adapter_local_restore_job_registry",
+        "status_tool": "jobs_get_status",
+        "status": status,
+        "snapshot_source": snapshot_source,
+        "terminal_source": terminal_source,
+        "cancellation_disposition": cancellation_disposition,
+        "handle_retention_owner": handle_retention_owner,
+        "dispatch_count": dispatch_count,
+        "poll_allowed": poll_allowed,
+        "duplicate_execution_allowed": False,
+        "late_completion_disposition": late_completion_disposition,
+    }
+
+
+def _job_for_state(state):
+    if state in {"preflight_rejected", "confirmation_consume_rejected", "target_guard_rejected"}:
+        source = {
+            "preflight_rejected": "preflight",
+            "confirmation_consume_rejected": "confirmation_cas",
+            "target_guard_rejected": "target_guard",
+        }[state]
+        return _job_descriptor(
+            status="terminal_not_dispatched",
+            snapshot_source=source,
+            terminal_source=source,
+            handle_retention_owner="released_before_dispatch",
+            dispatch_count=0,
+            poll_allowed=False,
+            late_completion_disposition="not_applicable",
+        )
+    if state in {"succeeded", "failed_unchanged"}:
+        return _job_descriptor(
+            status="terminal",
+            snapshot_source="official_sdk_readback",
+            terminal_source="official_sdk_readback",
+            handle_retention_owner="released_after_terminal_readback",
+            poll_allowed=False,
+            late_completion_disposition="not_applicable",
+        )
+    if state == "failed_unknown":
+        return _job_descriptor(
+            status="terminal",
+            snapshot_source="official_sdk_failure",
+            terminal_source="official_sdk_failure",
+            handle_retention_owner="released_after_terminal_unknown",
+            poll_allowed=False,
+            late_completion_disposition="not_applicable",
+        )
+    if state == "indeterminate":
+        return _job_descriptor(snapshot_source="transport_loss")
+    return _job_descriptor()
+
+
 def _result(state: str):
     before = _scene_receipt("working_scene.vdf", "b" * 64, "c" * 64)
     after = _scene_receipt("marked_take.vdf", "d" * 64, "a" * 64)
@@ -76,6 +145,7 @@ def _result(state: str):
         "dispatch_performed": True,
         "confirmation_consumed": True,
         "approved_recovery_receipt": _request()["recovery_receipt"],
+        "job": _job_for_state(state),
     }
     if state == "succeeded":
         target_identity = {
@@ -122,6 +192,7 @@ def _result(state: str):
                 "failed_precondition": "canonical_target_is_contained_by_canonical_trusted_root",
                 "before_receipt": None,
                 "after_receipt": None,
+                "job": _job_for_state(state),
             },
         }
     if state == "failed_unchanged":
@@ -161,6 +232,7 @@ def _result(state: str):
                 "consume_outcome": "lost_atomic_compare_and_set",
                 "before_receipt": before,
                 "after_receipt": None,
+                "job": _job_for_state(state),
             },
         }
     if state == "target_guard_rejected":
@@ -182,6 +254,7 @@ def _result(state: str):
                 "guard_outcome": "predispatch_identity_or_receipt_mismatch",
                 "before_receipt": before,
                 "after_receipt": None,
+                "job": _job_for_state(state),
             },
         }
     return {
@@ -212,14 +285,18 @@ def _pointer(document, pointer: str):
 
 def _validate_result(result):
     _validator("output_schema").validate(result)
-    rules = _contract()["semantic_postconditions"][result["context"]["state"]]
     errors = []
-    for left, right in rules.get("equal", []):
-        if _pointer(result, left) != _pointer(result, right):
-            errors.append(f"{left} must equal {right}")
-    for left, right in rules.get("not_equal", []):
-        if _pointer(result, left) == _pointer(result, right):
-            errors.append(f"{left} must not equal {right}")
+    contract = _contract()
+    for rules in (
+        contract["semantic_invariants"],
+        contract["semantic_postconditions"][result["context"]["state"]],
+    ):
+        for left, right in rules.get("equal", []):
+            if _pointer(result, left) != _pointer(result, right):
+                errors.append(f"{left} must equal {right}")
+        for left, right in rules.get("not_equal", []):
+            if _pointer(result, left) == _pointer(result, right):
+                errors.append(f"{left} must not equal {right}")
     for receipt_name in _contract()["scene_receipt_validation"]["apply_to"]:
         receipt = result["context"].get(receipt_name)
         if receipt is None:
@@ -231,6 +308,225 @@ def _validate_result(result):
             errors.append(f"/{receipt_name}/scene_name must equal file_name")
     if errors:
         raise ValidationError("; ".join(errors))
+
+
+@pytest.mark.parametrize(
+    "state",
+    (
+        "preflight_rejected",
+        "confirmation_consume_rejected",
+        "target_guard_rejected",
+        "succeeded",
+        "failed_unchanged",
+        "failed_unknown",
+        "timed_out",
+        "indeterminate",
+    ),
+)
+@pytest.mark.parametrize("field", ("message", "prompt"))
+def test_output_schema_rejects_unbounded_public_text_in_every_terminal_state(state, field):
+    result = _result(state)
+    result[field] = (
+        r"C:\operator-approved\recovery\marked_take.vdf "
+        "SDK exception: confirmation_secret=confirm-0001"
+    )
+
+    with pytest.raises(ValidationError):
+        _validator("output_schema").validate(result)
+
+
+def test_timeout_requires_exact_pollable_job_correlation_descriptor():
+    validator = _validator("output_schema")
+    correlated = _result("timed_out")
+
+    validator.validate(correlated)
+
+    uncorrelated = _result("timed_out")
+    uncorrelated["context"].pop("job")
+    with pytest.raises(ValidationError):
+        validator.validate(uncorrelated)
+
+
+def test_jobs_get_status_accepts_only_an_exact_job_id_and_never_execution_input():
+    status_schema = _contract()["async_job_contract"]["jobs_get_status_input_schema"]
+    Draft202012Validator.check_schema(status_schema)
+    validator = Draft202012Validator(status_schema)
+
+    validator.validate({"job_id": "restore-job-0001"})
+    for invalid in (
+        {},
+        {"job_id": "restore-job-0001", "request_id": "restore-0001"},
+        {"job_id": "restore-job-0001", "retry": True},
+        {"job_id": "restore-job-0001", "file_path": r"C:\secret\take.vdf"},
+        {"job_id": "bad job id"},
+    ):
+        with pytest.raises(ValidationError):
+            validator.validate(invalid)
+
+
+def test_cancellation_before_dispatch_is_terminal_and_consumes_no_authority():
+    request = _request()
+    store = FakeTrustedConfirmationStore()
+    store.issue(request, authenticated=True)
+    sdk = FakeOfficialSdkBoundary()
+    guard = FakeGuardedTargetBoundary()
+    jobs = FakeAsyncRestoreJobRegistry()
+    workflow = FakeAsyncRestoreWorkflow(store, sdk, guard, jobs)
+
+    result = workflow.start(request, "cancellation_before_dispatch")
+
+    _validate_result(result)
+    assert store.consume_count == sdk.dispatch_count == sdk.readback_count == 0
+    assert sdk.before_capture_count == 0
+    assert guard.open_count == guard.release_count == 1
+    assert guard.conflicting_replace_allowed() is True
+    assert result["context"]["job"] == {
+        **_job_descriptor(
+            status="terminal_not_dispatched",
+            snapshot_source="cancellation_before_dispatch",
+            terminal_source="cancellation_before_dispatch",
+            cancellation_disposition="honored_before_dispatch",
+            handle_retention_owner="released_before_dispatch",
+            dispatch_count=0,
+            poll_allowed=False,
+            late_completion_disposition="not_applicable",
+        ),
+        "operation_binding_sha256": result["context"]["job"]["operation_binding_sha256"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("outcome", "state", "cancellation_disposition"),
+    (
+        ("request_timeout", "timed_out", "not_requested"),
+        ("transport_loss", "indeterminate", "not_requested"),
+        (
+            "cancellation_after_dispatch",
+            "indeterminate",
+            "requested_after_dispatch_operation_continues",
+        ),
+    ),
+)
+def test_dispatched_unknown_outcomes_remain_owned_and_poll_without_redispatch(
+    outcome, state, cancellation_disposition
+):
+    request = _request()
+    store = FakeTrustedConfirmationStore()
+    store.issue(request, authenticated=True)
+    sdk = FakeOfficialSdkBoundary()
+    guard = FakeGuardedTargetBoundary()
+    jobs = FakeAsyncRestoreJobRegistry()
+    workflow = FakeAsyncRestoreWorkflow(store, sdk, guard, jobs)
+
+    result = workflow.start(request, outcome)
+    job = result["context"]["job"]
+
+    _validate_result(result)
+    assert result["context"]["state"] == state
+    assert job["snapshot_source"] == outcome
+    assert job["terminal_source"] is None
+    assert job["cancellation_disposition"] == cancellation_disposition
+    assert job["handle_retention_owner"] == "trusted_adapter_local_restore_job_registry"
+    assert job["dispatch_count"] == 1
+    assert job["poll_allowed"] is True
+    assert store.consume_count == sdk.dispatch_count == 1
+    assert sdk.readback_count == guard.release_count == 0
+
+    for _ in range(3):
+        assert (
+            workflow.poll(job["job_id"])["operation_binding_sha256"]
+            == (job["operation_binding_sha256"])
+        )
+    assert jobs.poll_count == 3
+    assert store.consume_count == sdk.dispatch_count == 1
+    assert sdk.readback_count == guard.release_count == 0
+    with pytest.raises(RuntimeError, match="duplicate restore dispatch forbidden"):
+        jobs.mark_dispatched(job["job_id"])
+
+
+def test_late_success_uses_exact_job_readback_terminal_source_and_releases_handles():
+    request = _request()
+    store = FakeTrustedConfirmationStore()
+    store.issue(request, authenticated=True)
+    sdk = FakeOfficialSdkBoundary()
+    guard = FakeGuardedTargetBoundary()
+    jobs = FakeAsyncRestoreJobRegistry()
+    workflow = FakeAsyncRestoreWorkflow(store, sdk, guard, jobs)
+    timed_out = workflow.start(request, "request_timeout")
+    original_job = timed_out["context"]["job"]
+
+    succeeded = workflow.poll(original_job["job_id"], late_success=True)
+    terminal_job = succeeded["context"]["job"]
+
+    _validate_result(succeeded)
+    assert terminal_job["job_id"] == original_job["job_id"]
+    assert terminal_job["operation_binding_sha256"] == original_job["operation_binding_sha256"]
+    assert terminal_job["snapshot_source"] == "late_official_sdk_readback"
+    assert terminal_job["terminal_source"] == "official_sdk_readback"
+    assert terminal_job["handle_retention_owner"] == "released_after_terminal_readback"
+    assert terminal_job["dispatch_count"] == 1
+    assert terminal_job["poll_allowed"] is False
+    assert terminal_job["late_completion_disposition"] == ("terminalized_by_official_sdk_readback")
+    assert (
+        store.consume_count == sdk.dispatch_count == sdk.readback_count == guard.release_count == 1
+    )
+
+    same_terminal = workflow.poll(original_job["job_id"], late_success=True)
+    assert same_terminal == terminal_job
+    assert (
+        store.consume_count == sdk.dispatch_count == sdk.readback_count == guard.release_count == 1
+    )
+
+    missing_terminal_source = json.loads(json.dumps(succeeded))
+    missing_terminal_source["context"]["job"]["terminal_source"] = None
+    with pytest.raises(ValidationError):
+        _validate_result(missing_terminal_source)
+
+
+def test_operation_binding_changes_with_the_request_and_unknown_job_ids_fail_closed():
+    bindings = []
+    for request in (_request(), _request(request_id="restore-0002")):
+        store = FakeTrustedConfirmationStore()
+        store.issue(request, authenticated=True)
+        jobs = FakeAsyncRestoreJobRegistry()
+        result = FakeAsyncRestoreWorkflow(
+            store,
+            FakeOfficialSdkBoundary(),
+            FakeGuardedTargetBoundary(),
+            jobs,
+        ).start(request, "request_timeout")
+        bindings.append(result["context"]["job"]["operation_binding_sha256"])
+        with pytest.raises(KeyError):
+            jobs.poll("restore-job-does-not-exist")
+
+    assert bindings[0] != bindings[1]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("terminal_source", "official_sdk_readback"),
+        ("dispatch_count", 0),
+        ("handle_retention_owner", "released_after_terminal_readback"),
+        ("poll_allowed", False),
+        ("duplicate_execution_allowed", True),
+        ("late_completion_disposition", "not_applicable"),
+    ),
+)
+def test_pending_job_descriptor_rejects_false_lifecycle_claims(field, value):
+    invalid = _result("timed_out")
+    invalid["context"]["job"][field] = value
+
+    with pytest.raises(ValidationError):
+        _validate_result(invalid)
+
+
+def test_job_id_is_typed_inside_context_not_as_an_unowned_top_level_field():
+    invalid = _result("timed_out")
+    invalid["job_id"] = invalid["context"]["job"]["job_id"]
+
+    with pytest.raises(ValidationError):
+        _validate_result(invalid)
 
 
 def _sha256_text(value: str) -> str:
@@ -650,10 +946,169 @@ class FakeRestoreWorkflow:
             self.guard.release(guard_token)
 
 
+class FakeAsyncRestoreJobRegistry:
+    def __init__(self):
+        self._records = {}
+        self._next_id = 1
+        self.poll_count = 0
+
+    def create_before_host_connection(self, request, ticket, resolver):
+        root = resolver.resolve(request["trusted_root"])
+        target = resolver.resolve(request["file_path"])
+        _, receipt_digest = _receipt_binding(request["recovery_receipt"])
+        binding = {
+            "request_id": request["request_id"],
+            "confirmation_id": ticket["confirmation_id"],
+            "confirmation_revision": ticket["revision"],
+            "canonical_trusted_root_sha256": root["sha256"],
+            "canonical_path_sha256": target["sha256"],
+            "target_volume_serial": target["volume_serial"],
+            "target_file_id": target["file_id"],
+            "recovery_receipt_binding_sha256": receipt_digest,
+        }
+        binding_bytes = json.dumps(binding, separators=(",", ":"), sort_keys=True).encode()
+        job_id = f"restore-job-{self._next_id:04d}"
+        self._next_id += 1
+        self._records[job_id] = {
+            "job_id": job_id,
+            "request_id": request["request_id"],
+            "operation": "restore_scene",
+            "operation_binding_sha256": hashlib.sha256(binding_bytes).hexdigest(),
+            "owner": "trusted_adapter_local_restore_job_registry",
+            "status_tool": "jobs_get_status",
+            "status": "created",
+            "snapshot_source": "created",
+            "terminal_source": None,
+            "cancellation_disposition": "not_requested",
+            "handle_retention_owner": "released_before_dispatch",
+            "dispatch_count": 0,
+            "poll_allowed": False,
+            "duplicate_execution_allowed": False,
+            "late_completion_disposition": "not_applicable",
+            "guard": None,
+            "guard_token": None,
+        }
+        return job_id
+
+    def retain_handles(self, job_id, guard, guard_token):
+        record = self._records[job_id]
+        assert record["dispatch_count"] == 0
+        record["guard"] = guard
+        record["guard_token"] = guard_token
+        record["handle_retention_owner"] = "trusted_adapter_local_restore_job_registry"
+
+    def cancel_before_dispatch(self, job_id):
+        record = self._records[job_id]
+        assert record["dispatch_count"] == 0
+        guard = record["guard"]
+        guard_token = record["guard_token"]
+        if guard is not None and guard_token is not None:
+            guard.release(guard_token)
+        record.update(
+            status="terminal_not_dispatched",
+            snapshot_source="cancellation_before_dispatch",
+            terminal_source="cancellation_before_dispatch",
+            cancellation_disposition="honored_before_dispatch",
+            handle_retention_owner="released_before_dispatch",
+            guard=None,
+            guard_token=None,
+        )
+
+    def mark_dispatched(self, job_id):
+        record = self._records[job_id]
+        if record["dispatch_count"]:
+            raise RuntimeError("duplicate restore dispatch forbidden")
+        record.update(
+            dispatch_count=1,
+            status="awaiting_late_readback",
+            poll_allowed=True,
+            late_completion_disposition="poll_exact_job_without_redispatch",
+        )
+
+    def snapshot_unknown(self, job_id, source):
+        record = self._records[job_id]
+        assert source in {"request_timeout", "transport_loss", "cancellation_after_dispatch"}
+        assert record["dispatch_count"] == 1
+        record["snapshot_source"] = source
+        if source == "cancellation_after_dispatch":
+            record["cancellation_disposition"] = "requested_after_dispatch_operation_continues"
+
+    def complete_late_success(self, job_id):
+        record = self._records[job_id]
+        assert record["dispatch_count"] == 1
+        guard = record["guard"]
+        guard_token = record["guard_token"]
+        assert guard is not None and guard_token is not None
+        guard.release(guard_token)
+        record.update(
+            status="terminal",
+            snapshot_source="late_official_sdk_readback",
+            terminal_source="official_sdk_readback",
+            handle_retention_owner="released_after_terminal_readback",
+            poll_allowed=False,
+            late_completion_disposition="terminalized_by_official_sdk_readback",
+            guard=None,
+            guard_token=None,
+        )
+
+    def descriptor(self, job_id):
+        record = self._records[job_id]
+        return {key: value for key, value in record.items() if key not in {"guard", "guard_token"}}
+
+    def poll(self, job_id):
+        self.poll_count += 1
+        return self.descriptor(job_id)
+
+
+class FakeAsyncRestoreWorkflow:
+    def __init__(self, store, sdk, guard, jobs):
+        self.store = store
+        self.sdk = sdk
+        self.guard = guard
+        self.jobs = jobs
+
+    def start(self, request, outcome):
+        ticket = self.store.trusted_lookup_and_compare(request)
+        assert ticket is not None
+        job_id = self.jobs.create_before_host_connection(request, ticket, self.store.resolver)
+        if outcome == "cancellation_before_dispatch":
+            guard_token = self.guard.open()
+            self.jobs.retain_handles(job_id, self.guard, guard_token)
+            self.jobs.cancel_before_dispatch(job_id)
+            result = _result("preflight_rejected")
+            result["context"]["failed_precondition"] = "cancellation_requested_before_dispatch"
+            result["context"]["job"] = self.jobs.descriptor(job_id)
+            return result
+
+        guard_token = self.guard.open()
+        before_receipt = self.sdk.capture_before()
+        self.guard.recapture(guard_token)
+        self.jobs.retain_handles(job_id, self.guard, guard_token)
+        assert self.store.cas_consume(ticket)
+        self.sdk.dispatch_restore(self.guard.dispatch_capability(guard_token))
+        self.jobs.mark_dispatched(job_id)
+        self.jobs.snapshot_unknown(job_id, outcome)
+        state = "timed_out" if outcome == "request_timeout" else "indeterminate"
+        result = _result(state)
+        result["context"]["before_receipt"] = before_receipt
+        result["context"]["job"] = self.jobs.descriptor(job_id)
+        return result
+
+    def poll(self, job_id, *, late_success=False):
+        descriptor = self.jobs.poll(job_id)
+        if late_success and descriptor["status"] == "awaiting_late_readback":
+            self.sdk.readback_after()
+            self.jobs.complete_late_success(job_id)
+            result = _result("succeeded")
+            result["context"]["job"] = self.jobs.descriptor(job_id)
+            return result
+        return descriptor
+
+
 def test_restore_contract_is_design_only_and_fail_closed():
     contract = _contract()
 
-    assert contract["contract_version"] == "1.4"
+    assert contract["contract_version"] == "1.5"
     assert contract["status"] == "proposed-design-only"
     assert contract["implementation_authorized"] is False
     assert contract["operation"] == {
@@ -756,6 +1211,27 @@ def test_restore_result_models_every_terminal_state_without_replay(state):
     assert before is None or before["active_scene_observed_via"] == "official_sdk"
     after = result["context"]["after_receipt"]
     assert after is None or after["active_scene_observed_via"] == "official_sdk"
+
+
+@pytest.mark.parametrize(
+    "state",
+    (
+        "preflight_rejected",
+        "confirmation_consume_rejected",
+        "target_guard_rejected",
+        "succeeded",
+        "failed_unchanged",
+        "failed_unknown",
+        "timed_out",
+        "indeterminate",
+    ),
+)
+def test_every_result_rejects_a_job_bound_to_another_request(state):
+    mismatched = _result(state)
+    mismatched["context"]["job"]["request_id"] = "restore-0002"
+
+    with pytest.raises(ValidationError, match="job/request_id"):
+        _validate_result(mismatched)
 
 
 @pytest.mark.parametrize(
@@ -1166,6 +1642,7 @@ def test_predispatch_guard_recapture_failure_has_a_legal_not_dispatched_state():
             "guard_outcome": "predispatch_identity_or_receipt_mismatch",
             "before_receipt": _scene_receipt("working_scene.vdf", "b" * 64, "c" * 64),
             "after_receipt": None,
+            "job": _job_for_state("target_guard_rejected"),
         },
     }
 
@@ -1374,6 +1851,7 @@ def test_scene_receipt_rejects_digest_not_derived_from_its_sdk_observation():
 def test_result_validation_requires_schema_and_semantic_postconditions():
     assert _contract()["result_validation_pipeline"] == [
         "draft2020_schema",
+        "semantic_invariants",
         "semantic_postconditions",
         "scene_identity_digest",
     ]
@@ -1404,6 +1882,57 @@ def test_contract_records_semantic_gates_not_expressible_in_json_schema():
     }
 
 
+def test_contract_freezes_public_text_and_exact_async_job_ownership():
+    contract = _contract()
+
+    assert contract["public_output_policy"] == {
+        "message_source": "fixed_state_constants_only",
+        "prompt": "always_null",
+        "prohibited_public_text": [
+            "full_paths",
+            "raw_exceptions",
+            "sdk_result_text",
+            "confirmation_secrets",
+        ],
+        "schema_enforcement": "branch_specific_message_const_and_null_prompt",
+        "internal_diagnostics": "operator_owned_sink_outside_public_result",
+    }
+    async_contract = contract["async_job_contract"]
+    assert async_contract["owner"] == "trusted_adapter_local_restore_job_registry"
+    assert async_contract["create_record"] == "before_host_connection_and_dispatch"
+    assert async_contract["result_member"] == "context.job"
+    assert async_contract["exact_operation_binding"] == {
+        "algorithm": "nfc_sorted_compact_json_sha256_v1",
+        "members": [
+            "request_id",
+            "confirmation_id",
+            "confirmation_revision",
+            "canonical_trusted_root_sha256",
+            "canonical_path_sha256",
+            "target_volume_serial",
+            "target_file_id",
+            "recovery_receipt_binding_sha256",
+        ],
+    }
+    assert async_contract["status_lookup"] == "trusted_record_by_exact_job_id"
+    assert async_contract["poll_may_dispatch"] is False
+    assert async_contract["retry_may_dispatch"] is False
+    assert async_contract["max_dispatch_count_per_job"] == 1
+    assert async_contract["handle_ownership"] == {
+        "transfer": ("request_scope_to_trusted_adapter_local_restore_job_registry_before_dispatch"),
+        "retain_after_dispatch": ("through_late_official_sdk_readback_or_terminal_unknown_effect"),
+        "release_before_dispatch": "cancellation_or_guard_rejection",
+        "release_after_dispatch": "only_after_terminal_readback_or_terminal_unknown_effect",
+    }
+    assert async_contract["late_completion"] == {
+        "correlation": "exact_job_id_and_operation_binding_sha256",
+        "polling": "jobs_get_status_never_redispatches",
+        "success_source": "official_sdk_readback",
+        "result_state": "succeeded",
+        "handles": "released_after_terminal_readback",
+    }
+
+
 def test_adr_preserves_the_design_only_acceptance_boundary():
     adr = ADR_PATH.read_text(encoding="utf-8")
 
@@ -1420,6 +1949,15 @@ def test_adr_preserves_the_design_only_acceptance_boundary():
         "failed_unchanged",
         "failed_unknown",
         "semantic_postconditions",
+        "fixed state-specific public messages",
+        "`prompt=null`",
+        "trusted adapter-local restore job registry",
+        "operation-binding digest",
+        "`jobs_get_status`",
+        "cancellation before dispatch",
+        "cancellation after dispatch",
+        "late official SDK read-back",
+        "never dispatches",
         "authenticated operator confirmation service",
         "trusted adapter-local store",
         "canonical-path digest",
