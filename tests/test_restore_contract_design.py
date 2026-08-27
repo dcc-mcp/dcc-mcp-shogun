@@ -8,7 +8,7 @@ import secrets
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Barrier, Condition, Lock, RLock
+from threading import Barrier, Condition, Event, Lock, RLock
 
 import pytest
 import yaml
@@ -1247,6 +1247,89 @@ def test_cancel_and_completion_race_is_monotonic_and_never_redispatches():
     }
 
 
+@pytest.mark.parametrize("readback_raises", (False, True))
+def test_cancellation_during_active_readback_claim_preserves_fence_and_terminalizes(
+    readback_raises,
+):
+    workflow, jobs, sdk, job_id = _pending_async_workflow()
+    readback_entered = Event()
+    release_readback = Event()
+    original_readback = sdk.readback_after
+    secret = "late SDK failure C:\\secret\\take.vdf token-456"
+
+    def blocking_readback():
+        readback_entered.set()
+        assert release_readback.wait(timeout=5)
+        if readback_raises:
+            with sdk._lock:
+                sdk.readback_count += 1
+            raise RuntimeError(secret)
+        return original_readback()
+
+    sdk.readback_after = blocking_readback
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        completion = pool.submit(workflow.poll, job_id, late_success=True)
+        assert readback_entered.wait(timeout=5)
+        with jobs.store.condition:
+            claimed_revision = jobs._records[job_id]["record_revision"]
+            assert jobs._records[job_id]["status"] == "readback_in_progress"
+
+        cancellation = jobs.request_cancellation(job_id)
+        with jobs.store.condition:
+            cancellation_revision = jobs._records[job_id]["record_revision"]
+            cancellation_intent = getattr(jobs.store, "cancellation_intents", {}).get(job_id)
+        repeated_cancellation = jobs.request_cancellation(job_id)
+        with jobs.store.condition:
+            assert jobs.store.cancellation_intents[job_id] == cancellation_intent
+            assert jobs._records[job_id]["record_revision"] == cancellation_revision
+        release_readback.set()
+        completed = completion.result(timeout=5)
+
+    _validate_result(completed)
+    assert cancellation_revision == claimed_revision
+    assert cancellation_intent["fence_revision"] == claimed_revision
+    expected_state = "failed_unknown" if readback_raises else "succeeded"
+    assert completed["context"]["state"] == expected_state
+    assert secret not in json.dumps(completed, sort_keys=True)
+    assert cancellation == {
+        "requested": True,
+        "effective": False,
+        "disposition": "requested_after_dispatch_operation_continues",
+    }
+    assert repeated_cancellation == cancellation
+    terminal = jobs.descriptor(job_id)
+    assert terminal["status"] == "terminal"
+    assert terminal["cancellation_requested"] is True
+    assert terminal["cancellation_effective"] is False
+    assert terminal["cancellation_disposition"] == ("requested_after_dispatch_operation_continues")
+    assert workflow.guard.release_count == 1
+    assert sdk.dispatch_count == sdk.readback_count == 1
+
+    assert workflow.poll(job_id, late_success=True) == terminal
+    assert workflow.guard.release_count == 1
+    assert sdk.dispatch_count == sdk.readback_count == 1
+
+
+def test_claim_bound_cancellation_intent_survives_registry_restart():
+    _, jobs, sdk, job_id = _pending_async_workflow()
+    event = jobs.make_completion_event(job_id, sdk.completion_receipt())
+    claim = jobs.claim_late_readback(event)
+    claimed_revision = claim["fence_revision"]
+
+    cancellation = jobs.request_cancellation(job_id)
+    restarted = FakeAsyncRestoreJobRegistry(jobs.store)
+    outcome = restarted.complete_guarded_readback(claim, sdk.readback_after())
+
+    assert cancellation["effective"] is False
+    assert outcome == "succeeded"
+    terminal = restarted.descriptor(job_id)
+    assert terminal["record_revision"] == claimed_revision + 1
+    assert terminal["cancellation_requested"] is True
+    assert terminal["cancellation_effective"] is False
+    assert terminal["cancellation_disposition"] == ("requested_after_dispatch_operation_continues")
+    assert sdk.dispatch_count == sdk.readback_count == 1
+
+
 def _pending_async_workflow(durable_store=None, *, sdk=None):
     request = _request()
     confirmation_store = FakeTrustedConfirmationStore()
@@ -1994,6 +2077,7 @@ class FakeDurableJobStore:
         self.claim_owner_secret = secrets.token_bytes(32)
         self.records = {}
         self.tombstones = {}
+        self.cancellation_intents = {}
         self.reserved_job_ids = set()
 
     def start_generation(self):
@@ -2265,6 +2349,17 @@ class FakeAsyncRestoreJobRegistry:
                     "effective": False,
                     "disposition": "ignored_after_terminal",
                 }
+            if record["status"] == "readback_in_progress":
+                intent = self._cancellation_intent_for_active_claim(record)
+                existing = self.store.cancellation_intents.get(job_id)
+                if existing is not None and existing != intent:
+                    raise RuntimeError("cancellation intent binding rejected")
+                self.store.cancellation_intents[job_id] = intent
+                return {
+                    "requested": True,
+                    "effective": False,
+                    "disposition": "requested_after_dispatch_operation_continues",
+                }
             if record["dispatch_attempt_reserved"]:
                 if not record["cancellation_requested"]:
                     self._advance(
@@ -2322,6 +2417,34 @@ class FakeAsyncRestoreJobRegistry:
                 "effective": False,
                 "disposition": "requested_after_dispatch_operation_continues",
             }
+
+    def _cancellation_intent_for_active_claim(self, record):
+        binding = {
+            "job_id": record["job_id"],
+            "job_generation": record["job_generation"],
+            "operation_binding_sha256": record["operation_binding_sha256"],
+            "claim_owner": record["readback_claim_owner"],
+            "claim_generation": record["readback_claim_generation"],
+            "fence_revision": record["readback_claim_fence_revision"],
+        }
+        canonical = json.dumps(binding, separators=(",", ":"), sort_keys=True).encode()
+        intent_id = (
+            "rci1-"
+            + hmac.new(
+                self.store.claim_owner_secret,
+                b"restore-cancellation-intent-v1\0" + canonical,
+                hashlib.sha256,
+            ).hexdigest()
+        )
+        return {
+            "intent_version": "1.0",
+            "intent_id": intent_id,
+            **binding,
+            "intent_revision": 1,
+            "requested": True,
+            "effective": False,
+            "disposition": "requested_after_dispatch_operation_continues",
+        }
 
     def make_completion_event(self, job_id, completion_receipt):
         with self.store.condition:
@@ -2475,6 +2598,11 @@ class FakeAsyncRestoreJobRegistry:
                 raise RuntimeError("late completion fence rejected")
             if not self._claim_fence_matches(record, claim, event):
                 raise RuntimeError("late completion fence rejected")
+            cancellation_intent = self.store.cancellation_intents.get(record["job_id"])
+            if cancellation_intent is not None and cancellation_intent != (
+                self._cancellation_intent_for_active_claim(record)
+            ):
+                raise RuntimeError("cancellation intent binding rejected")
             try:
                 _, actual_receipt_digest = _completion_receipt_binding(actual_receipt)
                 outcome = self._classify_completion(record, actual_receipt)
@@ -2511,6 +2639,13 @@ class FakeAsyncRestoreJobRegistry:
                 terminal_event_digest_sha256=event["event_digest_sha256"],
                 dispatch_count=1,
                 terminal_outcome=outcome,
+                cancellation_requested=cancellation_intent is not None,
+                cancellation_effective=False,
+                cancellation_disposition=(
+                    "requested_after_dispatch_operation_continues"
+                    if cancellation_intent is not None
+                    else record["cancellation_disposition"]
+                ),
                 guard=None,
                 guard_token=None,
             )
@@ -2655,7 +2790,7 @@ class FakeAsyncRestoreWorkflow:
 def test_restore_contract_is_design_only_and_fail_closed():
     contract = _contract()
 
-    assert contract["contract_version"] == "1.9"
+    assert contract["contract_version"] == "2.0"
     assert contract["status"] == "proposed-design-only"
     assert contract["implementation_authorized"] is False
     assert contract["operation"] == {
@@ -3707,6 +3842,7 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
             "full_before_after_and_recovery_receipts",
             "raw_sdk_and_internal_diagnostics",
             "durable_readback_claim_fence",
+            "durable_claim_bound_cancellation_intent",
         ],
         "public_projection": "adapter_secret_hmac_sha256_v1",
     }
@@ -3821,6 +3957,9 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
             "guard_recapture": "immediately_before_terminal_cas",
             "guard_release": "only_after_terminal_cas_for_exact_claimed_guard",
             "stale_foreign_or_replaced": "reject_without_commit_or_guard_release",
+            "active_claim_cancellation": (
+                "durable_hmac_bound_side_intent_without_job_revision_advance"
+            ),
         },
         "claim_schema": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3878,6 +4017,7 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
         "readback_claim": "durable_hmac_owner_generation_and_revision_fence",
         "completion_commit": "immediate_guard_recapture_then_exact_fence_terminal_cas",
         "handle_release": "after_terminal_cas_for_exact_claimed_guard_only",
+        "cancellation_during_readback_claim": ("fold_exact_durable_side_intent_into_terminal_cas"),
         "readback": "exactly_once_per_job",
         "duplicate_completion": "return_existing_terminal_without_readback",
         "out_of_order_completion": "reject_without_state_change",
@@ -3991,6 +4131,9 @@ def test_adr_preserves_the_design_only_acceptance_boundary():
         "immediately recapture",
         "foreign or replaced",
         "after the terminal CAS",
+        "claim-bound cancellation intent",
+        "does not advance the claimed job revision",
+        "terminal CAS folds",
         "SDK read-back exceptions",
         "resource-limit-plus-one",
         "unserializable read-back",

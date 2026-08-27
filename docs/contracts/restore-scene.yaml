@@ -1,4 +1,4 @@
-contract_version: "1.9"
+contract_version: "2.0"
 status: proposed-design-only
 implementation_authorized: false
 
@@ -51,6 +51,7 @@ private_audit_contract:
     - full_before_after_and_recovery_receipts
     - raw_sdk_and_internal_diagnostics
     - durable_readback_claim_fence
+    - durable_claim_bound_cancellation_intent
   public_projection: adapter_secret_hmac_sha256_v1
 
 synchronous_completion:
@@ -201,6 +202,7 @@ async_job_contract:
       guard_recapture: immediately_before_terminal_cas
       guard_release: only_after_terminal_cas_for_exact_claimed_guard
       stale_foreign_or_replaced: reject_without_commit_or_guard_release
+      active_claim_cancellation: durable_hmac_bound_side_intent_without_job_revision_advance
     claim_schema:
       $schema: https://json-schema.org/draft/2020-12/schema
       type: object
@@ -238,6 +240,7 @@ async_job_contract:
     readback_claim: durable_hmac_owner_generation_and_revision_fence
     completion_commit: immediate_guard_recapture_then_exact_fence_terminal_cas
     handle_release: after_terminal_cas_for_exact_claimed_guard_only
+    cancellation_during_readback_claim: fold_exact_durable_side_intent_into_terminal_cas
     readback: exactly_once_per_job
     duplicate_completion: return_existing_terminal_without_readback
     out_of_order_completion: reject_without_state_change

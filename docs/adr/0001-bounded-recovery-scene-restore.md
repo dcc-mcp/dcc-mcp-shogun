@@ -251,6 +251,11 @@ before/after terminal receipt or explicit unknown effect
   owner, claim generation, and fence revision. A stale, foreign or replaced
   claim or guard fails closed without committing and without releasing another
   owner's guard; the exact claimed guard is released only after the terminal CAS.
+  A cancellation arriving while that claim owns read-back is written as a
+  durable, HMAC-bound claim-bound cancellation intent in a separate audit
+  record. It does not advance the claimed job revision. The terminal CAS folds
+  the exact intent into `cancellation_requested=true` and
+  `cancellation_effective=false`; a foreign intent cannot invalidate the claim.
   An approved distinct read-back succeeds; an exact before receipt is failed
   unchanged; malformed, unbounded, wrong-target, wrong-digest, or event/read-back
   mismatch is failed unknown. Repeated polling of either pending or terminal
