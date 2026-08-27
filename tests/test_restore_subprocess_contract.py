@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import queue
+import runpy
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -31,6 +34,64 @@ def _start_harness(*args: object) -> subprocess.Popen[str]:
         stderr=subprocess.PIPE,
         text=True,
     )
+
+
+def _readline_with_timeout(
+    process: subprocess.Popen[str],
+    *,
+    timeout: float = 10,
+) -> str:
+    assert process.stdout is not None
+    lines: queue.Queue[str] = queue.Queue(maxsize=1)
+    reader = threading.Thread(
+        target=lambda: lines.put(process.stdout.readline()),
+        daemon=True,
+    )
+    reader.start()
+    try:
+        return lines.get(timeout=timeout).strip()
+    except queue.Empty as exc:
+        raise subprocess.TimeoutExpired(process.args, timeout) from exc
+
+
+def test_broker_listener_capacity_covers_concurrent_waiters():
+    namespace = runpy.run_path(
+        str(HARNESS),
+        run_name="restore_subprocess_contract_capacity",
+    )
+
+    assert "_open_broker_listener" in namespace
+    open_listener = namespace["_open_broker_listener"]
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    def fake_listener(address, *, backlog, authkey):
+        captured.update(address=address, backlog=backlog, authkey=authkey)
+        return sentinel
+
+    open_listener.__globals__["Listener"] = fake_listener
+
+    assert open_listener(b"bounded-test-authkey") is sentinel
+    assert captured == {
+        "address": ("127.0.0.1", 0),
+        "backlog": 8,
+        "authkey": b"bounded-test-authkey",
+    }
+
+
+def test_process_readiness_timeout_is_bounded():
+    sleeper = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            _readline_with_timeout(sleeper, timeout=0.05)
+    finally:
+        sleeper.terminate()
+        sleeper.wait(timeout=10)
 
 
 def _persist_owner_claim(tmp_path: Path, command: str = "owner-claim") -> None:
@@ -177,8 +238,8 @@ def test_notification_baseexception_replays_to_multiple_process_waiters(
     waiters: list[subprocess.Popen[str]] = []
     try:
         assert broker.stdout is not None
-        broker_ready = broker.stdout.readline().strip()
-        assert broker_ready == "READY", broker.stderr.read() if broker.stderr else ""
+        broker_ready = _readline_with_timeout(broker)
+        assert broker_ready == "READY"
         waiters = [
             _start_harness(
                 "wait",
@@ -189,7 +250,7 @@ def test_notification_baseexception_replays_to_multiple_process_waiters(
         ]
         for waiter in waiters:
             assert waiter.stdout is not None
-            assert waiter.stdout.readline().strip() == "READY"
+            assert _readline_with_timeout(waiter) == "READY"
 
         cleanup_crash = _run_harness(
             "recover",
@@ -233,7 +294,7 @@ def test_notification_baseexception_replays_to_multiple_process_waiters(
         wakeups = []
         for waiter in waiters:
             assert waiter.stdout is not None
-            wakeups.append(json.loads(waiter.stdout.readline()))
+            wakeups.append(json.loads(_readline_with_timeout(waiter)))
             assert waiter.wait(timeout=10) == 0
         assert (
             wakeups

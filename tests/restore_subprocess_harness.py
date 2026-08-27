@@ -9,6 +9,7 @@ from multiprocessing.connection import Client, Connection, Listener
 from pathlib import Path
 
 JOB_ID = "restore-job-cross-process-0001"
+BROKER_CONNECTION_BACKLOG = 8
 
 
 class InjectedNotificationBaseException(BaseException):
@@ -107,10 +108,18 @@ def _read_endpoint(path: Path) -> tuple[tuple[str, int], bytes]:
     return (endpoint["host"], endpoint["port"]), bytes.fromhex(endpoint["authkey"])
 
 
+def _open_broker_listener(authkey: bytes) -> Listener:
+    return Listener(
+        ("127.0.0.1", 0),
+        backlog=BROKER_CONNECTION_BACKLOG,
+        authkey=authkey,
+    )
+
+
 def run_broker(endpoint_path_value: str) -> None:
     endpoint_path = Path(endpoint_path_value)
     authkey = os.urandom(32)
-    listener = Listener(("127.0.0.1", 0), authkey=authkey)
+    listener = _open_broker_listener(authkey)
     host, port = listener.address
     _write_json(
         endpoint_path,
