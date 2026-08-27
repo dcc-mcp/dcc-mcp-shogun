@@ -192,8 +192,8 @@ def _reject_unsafe_hardlinks(handle):
 
 
 def _close_handle(handle):
-    if handle not in (None, INVALID_HANDLE_VALUE):
-        _kernel32.CloseHandle(handle)
+    if handle not in (None, INVALID_HANDLE_VALUE) and not _kernel32.CloseHandle(handle):
+        _win_error("CloseHandle failed")
 
 
 def _identity(handle):
@@ -393,11 +393,19 @@ class RetainedWindowsPath:
             self.dispatch_path = self.component_evidence[-1].final_path
             return self
         except Exception:
-            self.close()
+            try:
+                self.close()
+            except OSError:
+                pass
             raise
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.close()
+        try:
+            self.close()
+        except OSError:
+            if exc_type is None:
+                raise
+        return False
 
     @property
     def all_handles_retained(self):
@@ -407,7 +415,8 @@ class RetainedWindowsPath:
 
     def close(self):
         while self._handles:
-            _close_handle(self._handles.pop())
+            _close_handle(self._handles[-1])
+            self._handles.pop()
 
     def _capture_component_chain(self):
         evidence = tuple(_component_evidence(handle) for handle in self._handles)

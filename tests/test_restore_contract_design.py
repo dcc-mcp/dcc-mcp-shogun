@@ -77,6 +77,7 @@ def _job_descriptor(
     dispatch_count=1,
     poll_allowed=True,
     late_completion_disposition="poll_exact_job_without_redispatch",
+    cleanup_disposition="not_started",
 ):
     cancellation_requested = cancellation_disposition != "not_requested"
     cancellation_effective = cancellation_disposition == "honored_before_dispatch"
@@ -100,6 +101,7 @@ def _job_descriptor(
         "poll_allowed": poll_allowed,
         "duplicate_execution_allowed": False,
         "late_completion_disposition": late_completion_disposition,
+        "cleanup_disposition": cleanup_disposition,
         "record_revision": 5 if terminal else 3,
         "event_sequence": 4 if terminal else 2,
         "identity_tombstoned": True,
@@ -125,6 +127,7 @@ def _job_for_state(state):
             dispatch_count=0,
             poll_allowed=False,
             late_completion_disposition="not_applicable",
+            cleanup_disposition="released",
         )
     if state in {"succeeded", "failed_unchanged"}:
         return _job_descriptor(
@@ -134,6 +137,7 @@ def _job_for_state(state):
             handle_retention_owner="released_after_terminal_readback",
             poll_allowed=False,
             late_completion_disposition="not_applicable",
+            cleanup_disposition="released",
         )
     if state == "failed_unknown":
         return _job_descriptor(
@@ -143,6 +147,7 @@ def _job_for_state(state):
             handle_retention_owner="released_after_terminal_unknown",
             poll_allowed=False,
             late_completion_disposition="not_applicable",
+            cleanup_disposition="released",
         )
     if state == "indeterminate":
         return _job_descriptor(snapshot_source="transport_loss")
@@ -694,6 +699,29 @@ def test_cancellation_before_dispatch_is_terminal_and_consumes_no_authority():
     assert len(job["terminal_event_digest_sha256"]) == 64
 
 
+def test_cancellation_before_dispatch_cleanup_failure_retains_owner_and_tombstones():
+    request = _request()
+    store = FakeTrustedConfirmationStore()
+    store.issue(request, authenticated=True)
+    sdk = FakeOfficialSdkBoundary()
+    guard = FakeGuardedTargetBoundary(release_failure_phase="before_close")
+    jobs = FakeAsyncRestoreJobRegistry()
+    workflow = FakeAsyncRestoreWorkflow(store, sdk, guard, jobs)
+
+    result = workflow.start(request, "cancellation_before_dispatch")
+
+    _validate_result(result)
+    job = result["context"]["job"]
+    assert job["status"] == "terminal_not_dispatched"
+    assert job["handle_retention_owner"] == "trusted_adapter_local_restore_job_registry"
+    assert job["cleanup_disposition"] == "release_failed_owner_retained"
+    assert jobs.tombstone(job["job_id"])["cleanup_disposition"] == ("release_failed_owner_retained")
+    assert jobs.store.waiter_notification_count == 1
+    assert guard.release_count == 0
+    assert guard.conflicting_replace_allowed() is False
+    assert guard.release_error_text not in json.dumps(result, sort_keys=True)
+
+
 @pytest.mark.parametrize(
     ("outcome", "state", "cancellation_disposition"),
     (
@@ -844,6 +872,87 @@ def test_late_success_uses_exact_job_readback_terminal_source_and_releases_handl
     missing_terminal_source["context"]["job"]["terminal_source"] = None
     with pytest.raises(ValidationError):
         _validate_result(missing_terminal_source)
+
+
+def test_late_pre_close_failure_terminalizes_tombstones_notifies_and_retains_owner():
+    request = _request()
+    confirmation_store = FakeTrustedConfirmationStore()
+    confirmation_store.issue(request, authenticated=True)
+    sdk = FakeOfficialSdkBoundary()
+    guard = FakeGuardedTargetBoundary(release_failure_phase="before_close")
+    jobs = FakeAsyncRestoreJobRegistry()
+    workflow = FakeAsyncRestoreWorkflow(confirmation_store, sdk, guard, jobs)
+    pending = workflow.start(request, "request_timeout")
+    job_id = pending["context"]["job"]["job_id"]
+
+    result = workflow.poll(job_id, late_success=True)
+
+    _validate_result(result)
+    terminal = result["context"]["job"]
+    assert result["context"]["state"] == "succeeded"
+    assert terminal["status"] == "terminal"
+    assert terminal["handle_retention_owner"] == ("trusted_adapter_local_restore_job_registry")
+    assert terminal["cleanup_disposition"] == "release_failed_owner_retained"
+    tombstone = jobs.tombstone(job_id)
+    assert tombstone["terminal_revision"] == terminal["record_revision"]
+    assert tombstone["cleanup_disposition"] == "release_failed_owner_retained"
+    assert tombstone["handle_retention_owner"] == ("trusted_adapter_local_restore_job_registry")
+    assert (
+        tombstone["cleanup_binding_sha256"]
+        == (jobs.cleanup_record(job_id)["cleanup_binding_sha256"])
+    )
+    assert jobs.store.waiter_notification_count == 1
+    assert jobs.cleanup_record(job_id)["disposition"] == "release_failed_owner_retained"
+    assert guard.release_count == 0
+    assert guard.conflicting_replace_allowed() is False
+    serialized = json.dumps({"result": result, "cleanup": jobs.cleanup_record(job_id)})
+    assert guard.release_error_text not in serialized
+    assert r"C:\secret" not in serialized
+
+    duplicate = workflow.poll(job_id, late_success=True)
+    assert duplicate == terminal
+    assert sdk.dispatch_count == sdk.readback_count == 1
+    assert guard.release_count == 0
+
+    restarted = FakeAsyncRestoreJobRegistry(jobs.store)
+    assert restarted.descriptor(job_id) == terminal
+    assert restarted.tombstone(job_id) == jobs.tombstone(job_id)
+    assert restarted.cleanup_record(job_id) == jobs.cleanup_record(job_id)
+
+
+def test_late_post_close_failure_terminalizes_with_verified_release_and_tombstone():
+    request = _request()
+    confirmation_store = FakeTrustedConfirmationStore()
+    confirmation_store.issue(request, authenticated=True)
+    sdk = FakeOfficialSdkBoundary()
+    guard = FakeGuardedTargetBoundary(release_failure_phase="after_close")
+    jobs = FakeAsyncRestoreJobRegistry()
+    workflow = FakeAsyncRestoreWorkflow(confirmation_store, sdk, guard, jobs)
+    pending = workflow.start(request, "request_timeout")
+    job_id = pending["context"]["job"]["job_id"]
+
+    result = workflow.poll(job_id, late_success=True)
+
+    _validate_result(result)
+    terminal = result["context"]["job"]
+    assert result["context"]["state"] == "succeeded"
+    assert terminal["handle_retention_owner"] == "released_after_terminal_readback"
+    assert terminal["cleanup_disposition"] == "released_after_error_verified_closed"
+    tombstone = jobs.tombstone(job_id)
+    assert tombstone["terminal_revision"] == terminal["record_revision"]
+    assert tombstone["cleanup_disposition"] == "released_after_error_verified_closed"
+    assert tombstone["handle_retention_owner"] == "released_after_terminal_readback"
+    assert (
+        tombstone["cleanup_binding_sha256"]
+        == (jobs.cleanup_record(job_id)["cleanup_binding_sha256"])
+    )
+    assert jobs.store.waiter_notification_count == 1
+    assert jobs.cleanup_record(job_id)["disposition"] == ("released_after_error_verified_closed")
+    assert guard.release_count == 1
+    assert guard.conflicting_replace_allowed() is True
+    serialized = json.dumps({"result": result, "cleanup": jobs.cleanup_record(job_id)})
+    assert guard.release_error_text not in serialized
+    assert r"C:\secret" not in serialized
 
 
 def test_late_readback_with_a_wrong_canonical_digest_terminalizes_unknown_not_success():
@@ -1706,6 +1815,29 @@ class FakeTrustedClock:
         self._now += seconds
 
 
+class FakeDurableConfirmationStore:
+    def __init__(self):
+        self.condition = Condition(RLock())
+        self.records = {}
+        self.tombstones = {}
+        self.consume_count = 0
+
+    def insert_if_absent(self, record):
+        confirmation_id = record["confirmation_id"]
+        with self.condition:
+            if confirmation_id in self.tombstones:
+                raise ValueError("confirmation ID is immutable and nonreusable")
+            self.tombstones[confirmation_id] = {
+                "confirmation_id": confirmation_id,
+                "permanent": True,
+            }
+            self.records[confirmation_id] = record
+
+    def tombstone(self, confirmation_id):
+        with self.condition:
+            return dict(self.tombstones[confirmation_id])
+
+
 class FakeTrustedConfirmationStore:
     def __init__(
         self,
@@ -1713,13 +1845,16 @@ class FakeTrustedConfirmationStore:
         *,
         authority_generation="0000000000000001",
         trusted_clock=None,
+        durable_store=None,
     ):
         self.resolver = resolver or _resolver()
         self.authority_generation = authority_generation
         self.trusted_clock = trusted_clock or FakeTrustedClock()
-        self._records = {}
-        self._lock = Lock()
-        self.consume_count = 0
+        self.store = durable_store or FakeDurableConfirmationStore()
+
+    @property
+    def consume_count(self):
+        return self.store.consume_count
 
     def issue(self, request, *, authenticated, now=None):
         if not authenticated:
@@ -1748,10 +1883,7 @@ class FakeTrustedConfirmationStore:
         schema = _contract()["confirmation_authority"]["issuance_record_schema"]
         Draft202012Validator.check_schema(schema)
         Draft202012Validator(schema).validate(record)
-        with self._lock:
-            if record["confirmation_id"] in self._records:
-                raise ValueError("confirmation ID is immutable and nonreusable")
-            self._records[record["confirmation_id"]] = record
+        self.store.insert_if_absent(record)
         return record["confirmation_id"]
 
     def _binding_for_request(self, request):
@@ -1770,25 +1902,26 @@ class FakeTrustedConfirmationStore:
     def trusted_lookup_and_compare(self, request):
         now = self.trusted_clock.now()
         confirmation_id = request["operator_confirmation"]["confirmation_id"]
-        record = self._records.get(confirmation_id)
-        if record is None:
-            return None
-        expected = self._binding_for_request(request)
-        matches = all(record[field] == value for field, value in expected.items())
-        fresh = record["issued_at_epoch_seconds"] <= now < record["expires_at_epoch_seconds"]
-        ttl = record["expires_at_epoch_seconds"] - record["issued_at_epoch_seconds"] <= 300
-        if not (matches and fresh and ttl and not record["consumed"]):
-            return None
-        return {
-            "confirmation_id": confirmation_id,
-            "authority_generation": record["authority_generation"],
-            "revision": record["revision"],
-            "approved_target_identity": {
-                "canonical_path_sha256": record["canonical_path_sha256"],
-                "volume_serial": record["target_volume_serial"],
-                "file_id": record["target_file_id"],
-            },
-        }
+        with self.store.condition:
+            record = self.store.records.get(confirmation_id)
+            if record is None:
+                return None
+            expected = self._binding_for_request(request)
+            matches = all(record[field] == value for field, value in expected.items())
+            fresh = record["issued_at_epoch_seconds"] <= now < record["expires_at_epoch_seconds"]
+            ttl = record["expires_at_epoch_seconds"] - record["issued_at_epoch_seconds"] <= 300
+            if not (matches and fresh and ttl and not record["consumed"]):
+                return None
+            return {
+                "confirmation_id": confirmation_id,
+                "authority_generation": record["authority_generation"],
+                "revision": record["revision"],
+                "approved_target_identity": {
+                    "canonical_path_sha256": record["canonical_path_sha256"],
+                    "volume_serial": record["target_volume_serial"],
+                    "file_id": record["target_file_id"],
+                },
+            }
 
     def cas_consume(
         self,
@@ -1797,9 +1930,9 @@ class FakeTrustedConfirmationStore:
         *,
         guarded_target_binding,
     ):
-        with self._lock:
+        with self.store.condition:
             now = self.trusted_clock.now()
-            record = self._records[ticket["confirmation_id"]]
+            record = self.store.records[ticket["confirmation_id"]]
             expected = self._binding_for_request(request)
             fresh = record["issued_at_epoch_seconds"] <= now < record["expires_at_epoch_seconds"]
             ttl = record["expires_at_epoch_seconds"] - record["issued_at_epoch_seconds"] <= 300
@@ -1825,7 +1958,7 @@ class FakeTrustedConfirmationStore:
                 return False
             record["consumed"] = True
             record["revision"] += 1
-            self.consume_count += 1
+            self.store.consume_count += 1
             return True
 
 
@@ -1868,6 +2001,57 @@ class FakeOfficialSdkBoundary:
         return json.loads(json.dumps(self.completion_event_receipt))
 
 
+class FakeDurableCleanupStore:
+    def __init__(self):
+        self.condition = Condition(RLock())
+        self.records = []
+
+    def record(self, *, binding, phase, disposition):
+        canonical = json.dumps(binding, separators=(",", ":"), sort_keys=True).encode()
+        cleanup_record = {
+            "cleanup_version": "1.0",
+            "cleanup_binding_sha256": hashlib.sha256(canonical).hexdigest(),
+            "phase": phase,
+            "disposition": disposition,
+        }
+        with self.condition:
+            self.records.append(cleanup_record)
+        return dict(cleanup_record)
+
+    def last_record(self):
+        with self.condition:
+            return dict(self.records[-1])
+
+
+def _release_guard_preserving_primary(
+    cleanup_store,
+    *,
+    binding,
+    phase,
+    guard,
+    guard_token,
+):
+    try:
+        guard.release(guard_token)
+    except Exception:
+        disposition = (
+            "release_failed_owner_retained"
+            if guard.owns(guard_token)
+            else "released_after_error_verified_closed"
+        )
+    else:
+        disposition = "released"
+    return cleanup_store.record(
+        binding={
+            **binding,
+            "guard_owner": guard_token["guard_owner"],
+            "guard_generation": guard_token["guard_generation"],
+        },
+        phase=phase,
+        disposition=disposition,
+    )
+
+
 class FakeGuardedTargetBoundary:
     PINNED_OBJECTS = (
         "volume_root",
@@ -1882,6 +2066,7 @@ class FakeGuardedTargetBoundary:
         attempt_phase=None,
         observed_change_phase=None,
         attack_kind=None,
+        release_failure_phase=None,
     ):
         self._lock = Lock()
         self._owner_secret = secrets.token_hex(32)
@@ -1894,6 +2079,8 @@ class FakeGuardedTargetBoundary:
         self.attempt_phase = attempt_phase
         self.observed_change_phase = observed_change_phase
         self.attack_kind = attack_kind
+        self.release_failure_phase = release_failure_phase
+        self.release_error_text = r"CloseHandle failed C:\secret\take.vdf token-123"
         self.attack_log = []
         self.changed_objects = []
         self.baseline_namespace_identity = {
@@ -1990,19 +2177,24 @@ class FakeGuardedTargetBoundary:
     def release(self, token):
         if not self.owns(token):
             raise RuntimeError("guard ownership rejected")
+        if self.release_failure_phase == "before_close":
+            raise RuntimeError(self.release_error_text)
         token["held"] = False
         with self._lock:
             self._active_generations.remove(token["guard_generation"])
             self.release_count += 1
             self._active_count -= 1
+        if self.release_failure_phase == "after_close":
+            raise RuntimeError(self.release_error_text)
 
 
 class FakeRestoreWorkflow:
-    def __init__(self, store, sdk, guard, before_cas_barrier):
+    def __init__(self, store, sdk, guard, before_cas_barrier, cleanup_store=None):
         self.store = store
         self.sdk = sdk
         self.guard = guard
         self.before_cas_barrier = before_cas_barrier
+        self.cleanup_store = cleanup_store or FakeDurableCleanupStore()
         self.conflicting_replace_observations = []
 
     def execute(self, request):
@@ -2066,7 +2258,23 @@ class FakeRestoreWorkflow:
             result["context"]["before_receipt"] = before_receipt
             return result
         finally:
-            self.guard.release(guard_token)
+            cleanup_record = _release_guard_preserving_primary(
+                self.cleanup_store,
+                binding={
+                    "operation": "restore_scene",
+                    "request_id": request["request_id"],
+                },
+                phase="synchronous_result",
+                guard=self.guard,
+                guard_token=guard_token,
+            )
+            cleanup_disposition = cleanup_record["disposition"]
+            if "result" in locals():
+                result["context"]["job"]["cleanup_disposition"] = cleanup_disposition
+                if cleanup_disposition == "release_failed_owner_retained":
+                    result["context"]["job"]["handle_retention_owner"] = (
+                        "trusted_adapter_local_restore_job_registry"
+                    )
 
 
 class FakeDurableJobStore:
@@ -2079,6 +2287,8 @@ class FakeDurableJobStore:
         self.tombstones = {}
         self.cancellation_intents = {}
         self.reserved_job_ids = set()
+        self.cleanup_store = FakeDurableCleanupStore()
+        self.waiter_notification_count = 0
 
     def start_generation(self):
         with self.condition:
@@ -2175,6 +2385,7 @@ class FakeAsyncRestoreJobRegistry:
                 "poll_allowed": False,
                 "duplicate_execution_allowed": False,
                 "late_completion_disposition": "not_applicable",
+                "cleanup_disposition": "not_started",
                 "record_revision": 1,
                 "event_sequence": 0,
                 "identity_tombstoned": True,
@@ -2254,7 +2465,7 @@ class FakeAsyncRestoreJobRegistry:
         digest = hashlib.sha256(event_id.encode() + b"\0" + canonical).hexdigest()
         return event_id, digest
 
-    def _write_tombstone(self, record):
+    def _write_tombstone(self, record, cleanup_record=None):
         completion_event = record["completion_event"]
         self.store.tombstones[record["job_id"]] = {
             "job_id": record["job_id"],
@@ -2268,6 +2479,11 @@ class FakeAsyncRestoreJobRegistry:
                 if completion_event is not None
                 else None
             ),
+            "cleanup_binding_sha256": (
+                cleanup_record["cleanup_binding_sha256"] if cleanup_record is not None else None
+            ),
+            "cleanup_disposition": record["cleanup_disposition"],
+            "handle_retention_owner": record["handle_retention_owner"],
         }
 
     def retain_handles(self, job_id, guard, guard_token):
@@ -2377,12 +2593,27 @@ class FakeAsyncRestoreJobRegistry:
             if record["dispatch_count"] == 0:
                 guard = record["guard"]
                 guard_token = record["guard_token"]
-                if guard is not None and guard_token is not None:
-                    guard.release(guard_token)
                 event_id, event_digest = self._terminal_event(
                     record,
                     "cancellation_before_dispatch",
                 )
+                cleanup_record = None
+                cleanup_disposition = "released"
+                if guard is not None and guard_token is not None:
+                    cleanup_record = _release_guard_preserving_primary(
+                        self.store.cleanup_store,
+                        binding={
+                            "job_id": record["job_id"],
+                            "job_generation": record["job_generation"],
+                            "operation_binding_sha256": record["operation_binding_sha256"],
+                            "terminal_event_id": event_id,
+                        },
+                        phase="cancellation_before_dispatch",
+                        guard=guard,
+                        guard_token=guard_token,
+                    )
+                    cleanup_disposition = cleanup_record["disposition"]
+                release_confirmed = cleanup_disposition != "release_failed_owner_retained"
                 self._advance(
                     record,
                     status="terminal_not_dispatched",
@@ -2391,13 +2622,19 @@ class FakeAsyncRestoreJobRegistry:
                     cancellation_disposition="honored_before_dispatch",
                     cancellation_requested=True,
                     cancellation_effective=True,
-                    handle_retention_owner="released_before_dispatch",
+                    handle_retention_owner=(
+                        "released_before_dispatch"
+                        if release_confirmed
+                        else "trusted_adapter_local_restore_job_registry"
+                    ),
+                    cleanup_disposition=cleanup_disposition,
                     terminal_event_id=event_id,
                     terminal_event_digest_sha256=event_digest,
-                    guard=None,
-                    guard_token=None,
+                    guard=None if release_confirmed else guard,
+                    guard_token=None if release_confirmed else guard_token,
                 )
-                self._write_tombstone(record)
+                self._write_tombstone(record, cleanup_record)
+                self.store.waiter_notification_count += 1
                 self.store.condition.notify_all()
                 return {
                     "requested": True,
@@ -2612,6 +2849,20 @@ class FakeAsyncRestoreJobRegistry:
             if actual_receipt_digest != event["completion_receipt_sha256"]:
                 outcome = "failed_unknown"
             succeeded_or_unchanged = outcome in {"succeeded", "failed_unchanged"}
+            cleanup_record = _release_guard_preserving_primary(
+                self.store.cleanup_store,
+                binding={
+                    "job_id": record["job_id"],
+                    "job_generation": record["job_generation"],
+                    "operation_binding_sha256": record["operation_binding_sha256"],
+                    "terminal_event_id": event["event_id"],
+                },
+                phase="late_readback_terminal",
+                guard=guard,
+                guard_token=guard_token,
+            )
+            cleanup_disposition = cleanup_record["disposition"]
+            release_confirmed = cleanup_disposition != "release_failed_owner_retained"
             self._advance(
                 record,
                 advance_event=False,
@@ -2625,9 +2876,13 @@ class FakeAsyncRestoreJobRegistry:
                     "official_sdk_readback" if succeeded_or_unchanged else "official_sdk_failure"
                 ),
                 handle_retention_owner=(
-                    "released_after_terminal_readback"
-                    if succeeded_or_unchanged
-                    else "released_after_terminal_unknown"
+                    (
+                        "released_after_terminal_readback"
+                        if succeeded_or_unchanged
+                        else "released_after_terminal_unknown"
+                    )
+                    if release_confirmed
+                    else "trusted_adapter_local_restore_job_registry"
                 ),
                 poll_allowed=False,
                 late_completion_disposition=(
@@ -2646,11 +2901,12 @@ class FakeAsyncRestoreJobRegistry:
                     if cancellation_intent is not None
                     else record["cancellation_disposition"]
                 ),
-                guard=None,
-                guard_token=None,
+                cleanup_disposition=cleanup_disposition,
+                guard=None if release_confirmed else guard,
+                guard_token=None if release_confirmed else guard_token,
             )
-            guard.release(guard_token)
-            self._write_tombstone(record)
+            self._write_tombstone(record, cleanup_record)
+            self.store.waiter_notification_count += 1
             self.store.condition.notify_all()
             return outcome
 
@@ -2695,6 +2951,30 @@ class FakeAsyncRestoreJobRegistry:
     def tombstone(self, job_id):
         with self.store.condition:
             return dict(self.store.tombstones[job_id])
+
+    def cleanup_record(self, job_id):
+        with self.store.condition:
+            record = self._records[job_id]
+            cleanup_binding = {
+                "job_id": record["job_id"],
+                "job_generation": record["job_generation"],
+                "operation_binding_sha256": record["operation_binding_sha256"],
+                "terminal_event_id": record["completion_event"]["event_id"],
+                "guard_owner": record["retained_guard_owner"],
+                "guard_generation": record["retained_guard_generation"],
+            }
+            canonical = json.dumps(
+                cleanup_binding,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+            expected_digest = hashlib.sha256(canonical).hexdigest()
+            matches = [
+                item
+                for item in self.store.cleanup_store.records
+                if item["cleanup_binding_sha256"] == expected_digest
+            ]
+            return dict(matches[-1])
 
 
 class FakeAsyncRestoreWorkflow:
@@ -3148,6 +3428,94 @@ def test_consumed_confirmation_id_cannot_be_reissued_or_resurrected():
     assert store.trusted_lookup_and_compare(request) is None
 
 
+def test_consumed_confirmation_id_tombstone_survives_authority_restart():
+    request = _request()
+    durable_store = FakeDurableConfirmationStore()
+    original = FakeTrustedConfirmationStore(
+        durable_store=durable_store,
+        authority_generation="0000000000000001",
+    )
+    original.issue(request, authenticated=True)
+    ticket = original.trusted_lookup_and_compare(request)
+    assert ticket is not None
+    assert original.cas_consume(
+        ticket,
+        request,
+        guarded_target_binding=_trusted_target_binding(request, original.resolver),
+    )
+
+    restarted = FakeTrustedConfirmationStore(
+        durable_store=durable_store,
+        authority_generation="0000000000000002",
+    )
+    with pytest.raises(ValueError, match="confirmation ID is immutable and nonreusable"):
+        restarted.issue(request, authenticated=True)
+
+    confirmation_id = request["operator_confirmation"]["confirmation_id"]
+    assert restarted.trusted_lookup_and_compare(request) is None
+    assert durable_store.tombstone(confirmation_id) == {
+        "confirmation_id": confirmation_id,
+        "permanent": True,
+    }
+    assert durable_store.consume_count == 1
+
+
+def test_expired_confirmation_id_tombstone_survives_authority_restart():
+    request = _request()
+    durable_store = FakeDurableConfirmationStore()
+    original = FakeTrustedConfirmationStore(durable_store=durable_store)
+    original.issue(request, authenticated=True, now=NOW_EPOCH_SECONDS - 301)
+    assert original.trusted_lookup_and_compare(request) is None
+
+    restarted = FakeTrustedConfirmationStore(
+        durable_store=durable_store,
+        authority_generation="0000000000000002",
+    )
+    with pytest.raises(ValueError, match="confirmation ID is immutable and nonreusable"):
+        restarted.issue(request, authenticated=True)
+
+    confirmation_id = request["operator_confirmation"]["confirmation_id"]
+    assert restarted.trusted_lookup_and_compare(request) is None
+    assert durable_store.tombstone(confirmation_id)["permanent"] is True
+    assert durable_store.consume_count == 0
+
+
+def test_concurrent_authorities_atomically_issue_one_permanent_confirmation_id():
+    request = _request()
+    durable_store = FakeDurableConfirmationStore()
+    authorities = (
+        FakeTrustedConfirmationStore(
+            durable_store=durable_store,
+            authority_generation="0000000000000001",
+        ),
+        FakeTrustedConfirmationStore(
+            durable_store=durable_store,
+            authority_generation="0000000000000002",
+        ),
+    )
+    barrier = Barrier(2)
+
+    def issue(authority):
+        barrier.wait()
+        try:
+            authority.issue(request, authenticated=True)
+        except ValueError as error:
+            return str(error)
+        return "issued"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(issue, authorities))
+
+    assert sorted(outcomes) == [
+        "confirmation ID is immutable and nonreusable",
+        "issued",
+    ]
+    confirmation_id = request["operator_confirmation"]["confirmation_id"]
+    assert list(durable_store.records) == [confirmation_id]
+    assert list(durable_store.tombstones) == [confirmation_id]
+    assert durable_store.tombstone(confirmation_id)["permanent"] is True
+
+
 def test_concurrent_restore_workflows_consume_and_dispatch_exactly_once():
     request = _request()
     store = FakeTrustedConfirmationStore()
@@ -3265,6 +3633,106 @@ def test_synchronous_restore_readback_failure_is_redacted_failed_unknown(failure
     assert guard.release_count == 1
 
 
+def test_synchronous_pre_close_failure_preserves_primary_result_and_guard_owner():
+    request = _request()
+    store = FakeTrustedConfirmationStore()
+    store.issue(request, authenticated=True)
+    sdk = FakeOfficialSdkBoundary()
+    cleanup_store = FakeDurableCleanupStore()
+    guard = FakeGuardedTargetBoundary(release_failure_phase="before_close")
+    workflow = FakeRestoreWorkflow(
+        store,
+        sdk,
+        guard,
+        Barrier(1),
+        cleanup_store=cleanup_store,
+    )
+
+    result = workflow.execute(request)
+
+    _validate_result(result)
+    assert result["context"]["state"] == "succeeded"
+    assert result["context"]["job"]["handle_retention_owner"] == (
+        "trusted_adapter_local_restore_job_registry"
+    )
+    assert result["context"]["job"]["cleanup_disposition"] == ("release_failed_owner_retained")
+    assert guard.release_count == 0
+    assert guard.conflicting_replace_allowed() is False
+    assert cleanup_store.last_record() == {
+        "cleanup_version": "1.0",
+        "cleanup_binding_sha256": cleanup_store.last_record()["cleanup_binding_sha256"],
+        "phase": "synchronous_result",
+        "disposition": "release_failed_owner_retained",
+    }
+    serialized = json.dumps({"result": result, "cleanup": cleanup_store.last_record()})
+    assert guard.release_error_text not in serialized
+    assert r"C:\secret" not in serialized
+
+
+def test_synchronous_post_close_failure_preserves_primary_and_verified_release():
+    request = _request()
+    store = FakeTrustedConfirmationStore()
+    store.issue(request, authenticated=True)
+    sdk = FakeOfficialSdkBoundary()
+    cleanup_store = FakeDurableCleanupStore()
+    guard = FakeGuardedTargetBoundary(release_failure_phase="after_close")
+    workflow = FakeRestoreWorkflow(
+        store,
+        sdk,
+        guard,
+        Barrier(1),
+        cleanup_store=cleanup_store,
+    )
+
+    result = workflow.execute(request)
+
+    _validate_result(result)
+    assert result["context"]["state"] == "succeeded"
+    assert result["context"]["job"]["handle_retention_owner"] == (
+        "released_after_terminal_readback"
+    )
+    assert result["context"]["job"]["cleanup_disposition"] == (
+        "released_after_error_verified_closed"
+    )
+    assert guard.release_count == 1
+    assert guard.conflicting_replace_allowed() is True
+    assert cleanup_store.last_record()["disposition"] == ("released_after_error_verified_closed")
+    serialized = json.dumps({"result": result, "cleanup": cleanup_store.last_record()})
+    assert guard.release_error_text not in serialized
+    assert r"C:\secret" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("cleanup_disposition", "handle_retention_owner"),
+    (
+        ("release_failed_owner_retained", "released_after_terminal_readback"),
+        ("released", "trusted_adapter_local_restore_job_registry"),
+        (
+            "released_after_error_verified_closed",
+            "trusted_adapter_local_restore_job_registry",
+        ),
+    ),
+)
+def test_terminal_schema_rejects_false_cleanup_ownership_claims(
+    cleanup_disposition,
+    handle_retention_owner,
+):
+    private_result = _result("succeeded")
+    private_job = private_result["context"]["job"]
+    private_job["cleanup_disposition"] = cleanup_disposition
+    private_job["handle_retention_owner"] = handle_retention_owner
+
+    with pytest.raises(ValidationError):
+        _validate_result(private_result)
+
+    public_result = _public_result("succeeded")
+    public_job = public_result["context"]["job"]
+    public_job["cleanup_disposition"] = cleanup_disposition
+    public_job["handle_retention_owner"] = handle_retention_owner
+    with pytest.raises(ValidationError):
+        _validator("output_schema").validate(public_result)
+
+
 @pytest.mark.parametrize("phase", ("preflight", "recapture", "cas"))
 @pytest.mark.parametrize("attack_kind", ("namespace", "junction", "parent", "same_content"))
 def test_windows_namespace_change_before_cas_rejects_without_consume_or_dispatch(
@@ -3377,6 +3845,11 @@ def test_confirmation_authority_defines_trusted_issuance_lookup_compare_and_cons
 
     assert authority["issuer"] == "authenticated_operator_confirmation_service"
     assert authority["store"] == "trusted_adapter_local_store"
+    assert authority["persistence"] == ("shared_durable_atomic_store_survives_authority_restart")
+    assert authority["identity_reservation"] == (
+        "atomic_insert_only_tombstone_created_on_first_issue"
+    )
+    assert authority["concurrent_issuers"] == ("exactly_one_insert_winner_for_each_confirmation_id")
     assert authority["caller_supplied_records_accepted"] is False
     assert authority["path_canonicalization"] == "windows_handle_final_path_identity_v1"
     assert authority["receipt_canonicalization"] == "nfc_sorted_compact_json_utf8_v1"
@@ -3464,6 +3937,12 @@ def test_target_guard_freezes_exact_confirmed_file_through_dispatch_and_readback
         ),
         "change_before_cas": "target_guard_rejected_without_consume_or_dispatch",
         "swap_attempt_while_pinned": "blocked_by_windows_share_contract",
+        "close_semantics": {
+            "close_api": "CloseHandle",
+            "false_return": "cleanup_failure",
+            "failed_handle": "retained_by_exact_owner",
+            "primary_outcome": "preserved",
+        },
         "adversarial_proof": {
             "phases": ["preflight", "recapture", "cas", "dispatch"],
             "swap_kinds": ["namespace", "junction", "parent", "same_content"],
@@ -3805,6 +4284,8 @@ def test_contract_records_semantic_gates_not_expressible_in_json_schema():
         "unserializable_readback": "failed_unknown_without_public_payload",
         "failed_unknown_after_receipt": "null",
         "public_payload_projection": "fixed_message_and_error_only",
+        "cleanup_store": "durable_typed_redacted_cleanup_record",
+        "cleanup_failure": "preserve_primary_result_and_retain_owner_until_verified_closed",
     }
 
 
@@ -3900,6 +4381,22 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
         "release_before_dispatch": "cancellation_or_guard_rejection",
         "release_after_dispatch": "only_after_terminal_readback_or_terminal_unknown_effect",
     }
+    assert async_contract["cleanup"] == {
+        "store": "durable_typed_redacted_cleanup_record",
+        "binding": "sha256_exact_job_generation_operation_event_and_guard_identity",
+        "release_attempt": "under_exact_claim_fence_before_terminal_commit",
+        "dispositions": [
+            "not_started",
+            "released",
+            "release_failed_owner_retained",
+            "released_after_error_verified_closed",
+        ],
+        "failure_policy": "preserve_primary_outcome_and_never_claim_false_release",
+        "retained_failure_owner": "trusted_adapter_local_restore_job_registry",
+        "terminal_record": "durable_with_cleanup_disposition",
+        "tombstone": "always_persisted_for_terminal_outcome",
+        "waiter_notification": "always_after_terminal_record_and_tombstone",
+    }
     assert async_contract["late_completion"] == {
         "correlation": ("exact_job_id_generation_operation_binding_event_id_and_event_digest"),
         "event_identity": "rce1_sha256_exact_completion_event_v1",
@@ -3936,8 +4433,8 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
             "unserializable_receipt": "terminal_failed_unknown_under_exact_claim_fence",
             "after_receipt": "null",
             "public_diagnostic": "fixed_message_and_error_only",
-            "guard_release": "after_terminal_cas_for_exact_claim_only",
-            "waiter_notification": "after_terminal_record_and_guard_release",
+            "guard_release": "under_exact_claim_fence_before_terminal_commit",
+            "waiter_notification": ("after_terminal_record_and_tombstone_even_when_cleanup_fails"),
             "duplicate_poll": "return_terminal_without_readback_or_dispatch",
         },
         "claim_fence": {
@@ -3955,7 +4452,7 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
             ],
             "completion_cas": "exact_latest_owner_generation_and_fence_revision",
             "guard_recapture": "immediately_before_terminal_cas",
-            "guard_release": "only_after_terminal_cas_for_exact_claimed_guard",
+            "guard_release": "exact_claimed_guard_only_with_typed_cleanup_disposition",
             "stale_foreign_or_replaced": "reject_without_commit_or_guard_release",
             "active_claim_cancellation": (
                 "durable_hmac_bound_side_intent_without_job_revision_advance"
@@ -4007,7 +4504,7 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
             },
             "additionalProperties": False,
         },
-        "handles": "released_after_terminal_readback",
+        "handles": "released_or_truthfully_retained_by_cleanup_disposition",
     }
     assert async_contract["transitions"] == {
         "synchronization": "durable_store_compare_and_set_lock",
@@ -4016,7 +4513,7 @@ def test_contract_freezes_public_text_and_exact_async_job_ownership():
         "terminal_immutability": "no_writes_after_terminal",
         "readback_claim": "durable_hmac_owner_generation_and_revision_fence",
         "completion_commit": "immediate_guard_recapture_then_exact_fence_terminal_cas",
-        "handle_release": "after_terminal_cas_for_exact_claimed_guard_only",
+        "handle_release": "exact_claim_fenced_cleanup_before_terminal_commit",
         "cancellation_during_readback_claim": ("fold_exact_durable_side_intent_into_terminal_cas"),
         "readback": "exactly_once_per_job",
         "duplicate_completion": "return_existing_terminal_without_readback",
@@ -4130,12 +4627,16 @@ def test_adr_preserves_the_design_only_acceptance_boundary():
         "fence revision",
         "immediately recapture",
         "foreign or replaced",
-        "after the terminal CAS",
         "claim-bound cancellation intent",
         "does not advance the claimed job revision",
         "terminal CAS folds",
         "SDK read-back exceptions",
         "resource-limit-plus-one",
+        "CloseHandle",
+        "shared durable atomic confirmation store",
+        "cleanup disposition",
+        "preserves the primary restore outcome",
+        "never claims that a guard was released",
         "unserializable read-back",
         "notify every waiter",
         "8 GiB",

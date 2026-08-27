@@ -3,6 +3,7 @@ import os
 
 import pytest
 
+import tools.windows_restore_path_guard as path_guard
 from tools.windows_restore_path_guard import (
     RetainedWindowsPath,
     WindowsSdkPathAdapter,
@@ -227,3 +228,48 @@ def test_target_hashing_streams_multiple_bounded_chunks(tmp_path):
         assert retained.confirmed.file_size_bytes == len(confirmed_bytes)
         assert retained.confirmed.sha256 == hashlib.sha256(confirmed_bytes).hexdigest()
         assert retained.streamed_chunk_count >= 4
+
+
+def test_close_handle_failure_is_observable_and_retains_exact_cleanup_owner(
+    tmp_path,
+    monkeypatch,
+):
+    _, trusted_root, _, target, _, _ = _scene_layout(tmp_path)
+    retained = RetainedWindowsPath(trusted_root, target)
+    retained.__enter__()
+    original_close_handle = path_guard._kernel32.CloseHandle
+
+    try:
+        monkeypatch.setattr(path_guard._kernel32, "CloseHandle", lambda _handle: 0)
+        with pytest.raises(OSError, match="CloseHandle failed"):
+            retained.close()
+
+        assert retained.all_handles_retained
+    finally:
+        monkeypatch.setattr(path_guard._kernel32, "CloseHandle", original_close_handle)
+        retained.close()
+
+    assert retained.all_handles_retained is False
+
+
+def test_context_cleanup_failure_does_not_replace_the_primary_operation_error(
+    tmp_path,
+    monkeypatch,
+):
+    _, trusted_root, _, target, _, _ = _scene_layout(tmp_path)
+    retained = RetainedWindowsPath(trusted_root, target)
+    original_close_handle = path_guard._kernel32.CloseHandle
+    primary_error = "primary SDK result failed_unknown"
+
+    try:
+        with pytest.raises(RuntimeError, match=primary_error):
+            with retained:
+                monkeypatch.setattr(path_guard._kernel32, "CloseHandle", lambda _handle: 0)
+                raise RuntimeError(primary_error)
+
+        assert retained.all_handles_retained
+    finally:
+        monkeypatch.setattr(path_guard._kernel32, "CloseHandle", original_close_handle)
+        retained.close()
+
+    assert retained.all_handles_retained is False
