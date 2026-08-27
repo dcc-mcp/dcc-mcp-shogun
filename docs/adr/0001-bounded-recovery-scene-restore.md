@@ -29,8 +29,8 @@ prior recovery receipt + exact operator confirmation
                     |
                     v
 trusted-root containment and receipt preflight
-                    |
-                    v
+       | reject: preflight_rejected, no host connection
+       v pass
 single-use confirmation consumption -> one official SDK dispatch
                     |
                     v
@@ -53,16 +53,28 @@ before/after terminal receipt or explicit unknown effect
   and `active_scene_changed=false`. The canonical target basename, current byte
   count, and freshly computed SHA-256 must match before dispatch.
 - Validate all fields before connecting to a host. A mismatch is a preflight
-  failure and must not consume mutation authority.
+  failure and must not consume mutation authority. `preflight_rejected` is the
+  legal terminal result for every precondition failure and records
+  `host_connection_performed=false`, `dispatch_performed=false`,
+  `confirmation_consumed=false`, and null before/after receipts.
 
 ### Capability and confirmation
 
 - The capability is explicitly destructive, non-idempotent, single-use, and
   non-replayable. It must never run automatically as recovery or error handling.
-- Require a fresh operator confirmation bound to the exact request ID and exact
-  canonical path. It must separately acknowledge destructive and non-idempotent
-  behavior. Consume its confirmation ID atomically immediately before dispatch;
-  a consumed ID cannot authorize another call.
+- Accept only a confirmation ID in a restore request. The corresponding signed
+  issuance record must come from an authenticated operator confirmation service
+  and reside in a trusted adapter-local store; caller-supplied records are not
+  authority. The record binds the confirmation to the request ID, a canonical
+  trusted-root digest, a canonical-path digest, and a canonical digest of the
+  complete recovery receipt. Path digests use the case-folded Windows final
+  path; receipt digests use sorted compact JSON, both encoded as UTF-8 before
+  SHA-256.
+- Enforce freshness and expiry with a maximum five-minute issuance lifetime.
+  Lookup by confirmation ID and compare every binding plus both destructive
+  acknowledgements before connection. Immediately before the single dispatch,
+  use an atomic compare-and-set from unconsumed to consumed. A mismatch, expired
+  record, future record, or consumed record produces `preflight_rejected`.
 - A future public tool would use one typed official SDK scene-load method only.
   Active-scene identity before and after dispatch must be read through the
   official SDK. Arbitrary HSL, Python, UI automation, generic command text,
@@ -72,17 +84,29 @@ before/after terminal receipt or explicit unknown effect
 
 - Capture a bounded `before_receipt` through the official SDK before consuming
   the confirmation. Verified success requires an `after_receipt` from a fresh
-  official SDK read-back and a scene identity matching the approved recovery
-  receipt.
-- `succeeded` is the only state allowed to report `effect=verified`.
-- `failed` may report `effect=unchanged` only when read-back proves the before
-  identity remains active; otherwise it reports `effect=unknown`.
+  official SDK read-back. Both receipts include SDK scene identity and bounded
+  filesystem name, byte-count, and SHA-256 evidence.
+- `succeeded` is the only state allowed to report `effect=verified`. Its
+  machine-readable `semantic_postconditions` require distinct before/after
+  scene identities and require the after name, bytes, and digest to equal the
+  approved recovery receipt. The branch also requires const-true evidence for
+  official SDK read-back, distinct identities, and approved-receipt matching.
+- `failed_unchanged` requires a completed official SDK read-back and exact
+  equality of before/after identity, name, bytes, and digest. It is the only
+  dispatched failure allowed to report `effect=unchanged`, and it requires
+  const-true read-back and before/after equality evidence.
+- `failed_unknown` requires `effect=unknown`, no claimed read-back, and a null
+  after receipt. It cannot inherit the evidence privileges of
+  `failed_unchanged`.
 - `timed_out` and `indeterminate` are terminal unknown-effect states. After the
   single dispatch, callers may poll status or inspect state, but must never
   replay the mutation or reuse the confirmation.
 - Results must retain the repository's bounded success/failure envelope and
   exclude full paths, raw exception messages, SDK result text, and operator
-  confirmation secrets.
+  confirmation secrets. Validation is a mandatory two-stage pipeline: first the
+  Draft 2020-12 schema, then the JSON-pointer `semantic_postconditions`.
+  Structural schema validation alone is insufficient because standard JSON
+  Schema cannot compare two dynamic receipt values.
 
 ## Real-host acceptance boundary
 
@@ -100,6 +124,8 @@ recovery is part of this ADR.
 
 - Path authority, receipt identity, confirmation, dispatch, and verification
   are separate fail-closed gates.
+- Preflight rejection, verified effects, proven unchanged effects, and unknown
+  effects have disjoint executable schema branches.
 - Timeout and liveness ambiguity cannot silently become a retry or success.
 - The design reuses PR #39 evidence without treating PR #39 or PR #40 as proof
   of a scene replacement.

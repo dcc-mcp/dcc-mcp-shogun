@@ -1,4 +1,4 @@
-contract_version: "1.0"
+contract_version: "1.1"
 status: proposed-design-only
 implementation_authorized: false
 
@@ -32,17 +32,64 @@ real_host_acceptance:
   requires_explicit_approved_path_scope: true
   requires_separate_operator_authorization: true
 
+confirmation_authority:
+  issuer: authenticated_operator_confirmation_service
+  store: trusted_adapter_local_store
+  caller_supplied_records_accepted: false
+  lookup_key: confirmation_id
+  comparison_fields:
+    - request_id
+    - canonical_trusted_root_sha256
+    - canonical_path_sha256
+    - recovery_receipt_binding_sha256
+  path_canonicalization: windows_final_path_casefold_utf8_v1
+  receipt_canonicalization: sorted_compact_json_utf8_v1
+  digest_algorithm: sha256_utf8_canonical_v1
+  max_ttl_seconds: 300
+  consume: atomic_compare_and_set_unconsumed_before_dispatch
+  issuance_record_schema:
+    $schema: https://json-schema.org/draft/2020-12/schema
+    type: object
+    required:
+      - record_version
+      - confirmation_id
+      - request_id
+      - canonical_trusted_root_sha256
+      - canonical_path_sha256
+      - recovery_receipt_binding_sha256
+      - issued_at_epoch_seconds
+      - expires_at_epoch_seconds
+      - destructive_acknowledged
+      - non_idempotent_acknowledged
+      - consumed
+    properties:
+      record_version: {type: string, const: "1.0"}
+      confirmation_id:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+      request_id:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+      canonical_trusted_root_sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+      canonical_path_sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+      recovery_receipt_binding_sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+      issued_at_epoch_seconds: {type: integer, minimum: 0}
+      expires_at_epoch_seconds: {type: integer, minimum: 1}
+      destructive_acknowledged: {type: boolean, const: true}
+      non_idempotent_acknowledged: {type: boolean, const: true}
+      consumed: {type: boolean}
+    additionalProperties: false
+
 input_schema:
   $schema: https://json-schema.org/draft/2020-12/schema
   $id: https://github.com/dcc-mcp/dcc-mcp-shogun/docs/contracts/restore-scene-input.schema.json
   title: Proposed recovery-scene restore request
   type: object
-  required:
-    - request_id
-    - trusted_root
-    - file_path
-    - recovery_receipt
-    - operator_confirmation
+  required: [request_id, trusted_root, file_path, recovery_receipt, operator_confirmation]
   properties:
     request_id:
       type: string
@@ -59,14 +106,22 @@ input_schema:
       minLength: 7
       maxLength: 4096
       pattern: "^[A-Za-z]:[\\\\/].+\\.[vV][dD][fF]$"
+    recovery_receipt: {$ref: "#/$defs/recovery_receipt"}
+    operator_confirmation:
+      type: object
+      required: [confirmation_id]
+      properties:
+        confirmation_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+      additionalProperties: false
+  additionalProperties: false
+  $defs:
     recovery_receipt:
       type: object
-      required:
-        - receipt_version
-        - file_name
-        - file_size_bytes
-        - sha256
-        - active_scene_changed
+      required: [receipt_version, file_name, file_size_bytes, sha256, active_scene_changed]
       properties:
         receipt_version: {type: integer, const: 1}
         file_name:
@@ -78,43 +133,48 @@ input_schema:
         sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
         active_scene_changed: {type: boolean, const: false}
       additionalProperties: false
-    operator_confirmation:
-      type: object
-      required:
-        - confirmation_id
-        - scope
-        - destructive_acknowledged
-        - non_idempotent_acknowledged
-      properties:
-        confirmation_id:
-          type: string
-          minLength: 1
-          maxLength: 128
-          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
-        scope: {type: string, const: exact_request_and_path}
-        destructive_acknowledged: {type: boolean, const: true}
-        non_idempotent_acknowledged: {type: boolean, const: true}
-      additionalProperties: false
-  additionalProperties: false
 
 output_schema:
   $schema: https://json-schema.org/draft/2020-12/schema
   $id: https://github.com/dcc-mcp/dcc-mcp-shogun/docs/contracts/restore-scene-output.schema.json
   title: Proposed recovery-scene restore terminal result
   $defs:
+    recovery_receipt:
+      type: object
+      required: [receipt_version, file_name, file_size_bytes, sha256, active_scene_changed]
+      properties:
+        receipt_version: {type: integer, const: 1}
+        file_name:
+          type: string
+          minLength: 5
+          maxLength: 255
+          pattern: "^[^/\\\\]+\\.[vV][dD][fF]$"
+        file_size_bytes: {type: integer, minimum: 1}
+        sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+        active_scene_changed: {type: boolean, const: false}
+      additionalProperties: false
     scene_receipt:
       type: object
-      required: [observed_via, file_name, scene_identity_sha256]
+      required:
+        - active_scene_observed_via
+        - file_evidence_observed_via
+        - file_name
+        - file_size_bytes
+        - sha256
+        - scene_identity_sha256
       properties:
-        observed_via: {type: string, const: official_sdk}
+        active_scene_observed_via: {type: string, const: official_sdk}
+        file_evidence_observed_via: {type: string, const: filesystem}
         file_name:
           type: string
           minLength: 1
           maxLength: 255
           pattern: "^[^/\\\\]+$"
+        file_size_bytes: {type: integer, minimum: 1}
+        sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
         scene_identity_sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
       additionalProperties: false
-    succeeded_context:
+    preflight_rejected_context:
       type: object
       required:
         - receipt_version
@@ -122,6 +182,10 @@ output_schema:
         - state
         - effect
         - replay_allowed
+        - host_connection_performed
+        - dispatch_performed
+        - confirmation_consumed
+        - failed_precondition
         - before_receipt
         - after_receipt
       properties:
@@ -131,20 +195,35 @@ output_schema:
           minLength: 1
           maxLength: 128
           pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
-        state: {type: string, const: succeeded}
-        effect: {type: string, const: verified}
+        state: {type: string, const: preflight_rejected}
+        effect: {type: string, const: unchanged}
         replay_allowed: {type: boolean, const: false}
-        before_receipt: {$ref: "#/$defs/scene_receipt"}
-        after_receipt: {$ref: "#/$defs/scene_receipt"}
+        host_connection_performed: {type: boolean, const: false}
+        dispatch_performed: {type: boolean, const: false}
+        confirmation_consumed: {type: boolean, const: false}
+        failed_precondition:
+          type: string
+          enum:
+            - canonical_target_is_contained_by_canonical_trusted_root
+            - target_is_regular_vdf_without_symlink_or_reparse_escape
+            - target_basename_size_and_sha256_match_recovery_receipt
+            - recovery_receipt_reports_active_scene_unchanged
+            - operator_confirmation_is_fresh_exact_scope_and_unused
+        before_receipt: {type: "null"}
+        after_receipt: {type: "null"}
       additionalProperties: false
-    failed_context:
+    dispatched_context:
       type: object
       required:
         - receipt_version
         - request_id
         - state
-        - effect
         - replay_allowed
+        - dispatch_performed
+        - confirmation_consumed
+        - approved_recovery_receipt
+        - effect
+        - readback_performed
         - before_receipt
         - after_receipt
       properties:
@@ -154,39 +233,90 @@ output_schema:
           minLength: 1
           maxLength: 128
           pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
-        state: {type: string, const: failed}
-        effect: {type: string, enum: [unchanged, unknown]}
+        state:
+          type: string
+          enum: [succeeded, failed_unchanged, failed_unknown, timed_out, indeterminate]
         replay_allowed: {type: boolean, const: false}
+        dispatch_performed: {type: boolean, const: true}
+        confirmation_consumed: {type: boolean, const: true}
+        approved_recovery_receipt: {$ref: "#/$defs/recovery_receipt"}
+        effect: {type: string, enum: [verified, unchanged, unknown]}
+        readback_performed: {type: boolean}
         before_receipt: {$ref: "#/$defs/scene_receipt"}
         after_receipt:
           oneOf:
             - {$ref: "#/$defs/scene_receipt"}
             - {type: "null"}
-      additionalProperties: false
+    succeeded_context:
+      allOf:
+        - {$ref: "#/$defs/dispatched_context"}
+        - type: object
+          required: [postcondition_evidence]
+          properties:
+            state: {type: string, const: succeeded}
+            effect: {type: string, const: verified}
+            readback_performed: {type: boolean, const: true}
+            postcondition_evidence:
+              type: object
+              required:
+                - active_scene_readback_performed
+                - before_after_distinct
+                - after_matches_approved_recovery_receipt
+              properties:
+                active_scene_readback_performed: {type: boolean, const: true}
+                before_after_distinct: {type: boolean, const: true}
+                after_matches_approved_recovery_receipt: {type: boolean, const: true}
+              additionalProperties: false
+            after_receipt: {$ref: "#/$defs/scene_receipt"}
+      unevaluatedProperties: false
+    failed_unchanged_context:
+      allOf:
+        - {$ref: "#/$defs/dispatched_context"}
+        - type: object
+          required: [postcondition_evidence]
+          properties:
+            state: {type: string, const: failed_unchanged}
+            effect: {type: string, const: unchanged}
+            readback_performed: {type: boolean, const: true}
+            postcondition_evidence:
+              type: object
+              required: [active_scene_readback_performed, before_after_equal]
+              properties:
+                active_scene_readback_performed: {type: boolean, const: true}
+                before_after_equal: {type: boolean, const: true}
+              additionalProperties: false
+            after_receipt: {$ref: "#/$defs/scene_receipt"}
+      unevaluatedProperties: false
+    failed_unknown_context:
+      allOf:
+        - {$ref: "#/$defs/dispatched_context"}
+        - type: object
+          properties:
+            state: {type: string, const: failed_unknown}
+            effect: {type: string, const: unknown}
+            readback_performed: {type: boolean, const: false}
+            after_receipt: {type: "null"}
+      unevaluatedProperties: false
     unknown_effect_context:
-      type: object
-      required:
-        - receipt_version
-        - request_id
-        - state
-        - effect
-        - replay_allowed
-        - before_receipt
-        - after_receipt
-      properties:
-        receipt_version: {type: string, const: "1.0"}
-        request_id:
-          type: string
-          minLength: 1
-          maxLength: 128
-          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
-        state: {type: string, enum: [timed_out, indeterminate]}
-        effect: {type: string, const: unknown}
-        replay_allowed: {type: boolean, const: false}
-        before_receipt: {$ref: "#/$defs/scene_receipt"}
-        after_receipt: {type: "null"}
-      additionalProperties: false
+      allOf:
+        - {$ref: "#/$defs/dispatched_context"}
+        - type: object
+          properties:
+            state: {type: string, enum: [timed_out, indeterminate]}
+            effect: {type: string, const: unknown}
+            readback_performed: {type: boolean, const: false}
+            after_receipt: {type: "null"}
+      unevaluatedProperties: false
   oneOf:
+    - type: object
+      required: [success, message, prompt, error, context]
+      properties:
+        success: {type: boolean, const: false}
+        message: {type: string}
+        prompt: {type: [string, "null"]}
+        error: {type: string, const: RestorePreflightRejected}
+        context: {$ref: "#/$defs/preflight_rejected_context"}
+      additionalProperties: false
     - type: object
       required: [success, message, prompt, error, context]
       properties:
@@ -202,8 +332,17 @@ output_schema:
         success: {type: boolean, const: false}
         message: {type: string}
         prompt: {type: [string, "null"]}
-        error: {type: string, const: RestoreFailed}
-        context: {$ref: "#/$defs/failed_context"}
+        error: {type: string, const: RestoreFailedUnchanged}
+        context: {$ref: "#/$defs/failed_unchanged_context"}
+      additionalProperties: false
+    - type: object
+      required: [success, message, prompt, error, context]
+      properties:
+        success: {type: boolean, const: false}
+        message: {type: string}
+        prompt: {type: [string, "null"]}
+        error: {type: string, const: RestoreFailedUnknown}
+        context: {$ref: "#/$defs/failed_unknown_context"}
       additionalProperties: false
     - type: object
       required: [success, message, prompt, error, context]
@@ -231,3 +370,24 @@ output_schema:
             - properties:
                 state: {type: string, const: indeterminate}
       additionalProperties: false
+
+result_validation_pipeline: [draft2020_schema, semantic_postconditions]
+
+semantic_postconditions:
+  preflight_rejected: {}
+  succeeded:
+    equal:
+      - [/context/after_receipt/file_name, /context/approved_recovery_receipt/file_name]
+      - [/context/after_receipt/file_size_bytes, /context/approved_recovery_receipt/file_size_bytes]
+      - [/context/after_receipt/sha256, /context/approved_recovery_receipt/sha256]
+    not_equal:
+      - [/context/before_receipt/scene_identity_sha256, /context/after_receipt/scene_identity_sha256]
+  failed_unchanged:
+    equal:
+      - [/context/before_receipt/file_name, /context/after_receipt/file_name]
+      - [/context/before_receipt/file_size_bytes, /context/after_receipt/file_size_bytes]
+      - [/context/before_receipt/sha256, /context/after_receipt/sha256]
+      - [/context/before_receipt/scene_identity_sha256, /context/after_receipt/scene_identity_sha256]
+  failed_unknown: {}
+  timed_out: {}
+  indeterminate: {}
