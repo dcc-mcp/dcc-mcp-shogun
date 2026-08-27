@@ -213,6 +213,28 @@ before/after terminal receipt or explicit unknown effect
   can never make a prior job ID reusable. Its operation-binding digest covers
   the request ID, confirmation ID and revision, trusted-root and target
   identity, and recovery-receipt digest.
+- Durability claims require a real subprocess boundary. The executable harness
+  persists the claim and revisions in SQLite with full synchronous commits and
+  holds a kernel-released exclusive file lease for the registry-process epoch.
+  Process A exits with `os._exit` after persisting `readback_in_progress`;
+  independent Process-B successors reopen only the database and lease. They never inherit or
+  serialize request-local locks, weak references, guards, and waiters.
+  Exactly one successor may advance the durable CAS. The deterministic
+  in-memory state-machine tests remain useful for transition coverage but are
+  not evidence of restart durability.
+- A dead process's numeric Windows handles are never transferred to or closed
+  by a successor. Lease takeover proves that the process-owned kernel handles
+  have been closed by process teardown, and the private cleanup observation is
+  `kernel_closed_on_process_death`; it projects to the existing redacted public
+  `released_after_error_verified_closed` disposition. Recovery persists
+  `cleanup_pending` before terminal state, so another successor crash replays
+  cleanup, tombstone, and notification without a duplicate SDK read-back.
+- Cross-process waiter delivery uses a surviving authenticated local notification broker.
+  Terminal state and its tombstone commit before a replayable notification
+  intent. A notification `BaseException` leaves that intent pending; a later
+  successor resends it, and only a broker acknowledgement clears the durable
+  pending marker. Delivery is at least once and may wake multiple independently
+  registered waiter processes.
 - Raw job generation, caller request ID, operation binding, completion-event
   identity, scene/take/operator names, paths, and before/after/approved receipts
   remain only in the private audit record. The public result is a complete

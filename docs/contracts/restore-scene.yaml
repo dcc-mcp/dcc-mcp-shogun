@@ -135,6 +135,21 @@ async_job_contract:
     terminal_not_dispatched_after_reservation: forbidden
     handle_owner: trusted_adapter_local_restore_job_registry
     guarantee_without_sdk_transaction_or_idempotency: at_most_once_not_exactly_once
+  process_boundary:
+    executable_harness: subprocess_sqlite_and_kernel_lease
+    owner_claim_persistence: sqlite_full_sync_before_process_exit
+    request_local_objects: forbidden_across_process_boundary
+    lease: kernel_released_exclusive_file_lock
+    takeover: only_after_prior_process_lease_release
+    successor_race: exactly_one_terminal_compare_and_set
+    orphan_readback: zero_sdk_readback_failed_unknown_readback_owner_lost
+    handle_recovery: kernel_closed_on_process_death_no_numeric_handle_inheritance
+    cleanup_recovery: cleanup_pending_replayed_after_successor_crash
+    tombstone: durable_before_notification
+    notification_intent: durable_until_surviving_broker_ack
+    waiter_broker: authenticated_local_surviving_process
+    notification_delivery: at_least_once_after_baseexception
+    public_cleanup_projection: released_after_error_verified_closed
   cancellation:
     fields: [cancellation_requested, cancellation_effective, cancellation_disposition]
     before_dispatch:
