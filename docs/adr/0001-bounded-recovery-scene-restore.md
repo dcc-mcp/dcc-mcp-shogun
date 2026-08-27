@@ -69,6 +69,19 @@ before/after terminal receipt or explicit unknown effect
   `receipt_version`, scene identity (`file_name`), `file_size_bytes`, `sha256`,
   and `active_scene_changed=false`. The canonical target basename, current byte
   count, and freshly computed SHA-256 must match before dispatch.
+- Open the resolved target with `CreateFileW`, `GENERIC_READ` plus
+  `FILE_READ_ATTRIBUTES`, `OPEN_EXISTING`, and only `FILE_SHARE_READ`. Treat an
+  incompatible existing writer as rejection; while held, this share mode denies
+  conflicting write, delete, rename, and replacement opens. Keep this guarded
+  handle from the preflight identity/receipt match through dispatch and terminal
+  official SDK read-back (or an unknown-effect terminal result).
+- Immediately before confirmation CAS, recapture final path identity, volume
+  serial, 128-bit file ID, bytes, and content digest from that same guarded
+  handle. Any difference from the confirmation record or recovery receipt fails
+  closed without consuming or dispatching. Because host connection and before
+  capture may already have occurred, this path returns `target_guard_rejected`
+  with unknown effect, the bounded before receipt, null after receipt, and both
+  consumption and dispatch false.
 - Validate all fields before connecting to a host. A mismatch is a preflight
   failure and must not consume mutation authority. `preflight_rejected` is the
   legal terminal result for every precondition failure and records
@@ -83,8 +96,9 @@ before/after terminal receipt or explicit unknown effect
   issuance record must come from an authenticated operator confirmation service
   and reside in a trusted adapter-local store; caller-supplied records are not
   authority. The record binds the confirmation to the request ID, a canonical
-  trusted-root digest, a canonical-path digest, and a canonical digest of the
-  complete recovery receipt. The receipt binding normalizes every string to
+  trusted-root digest, a canonical-path digest, the target volume serial and
+  128-bit file ID, and a canonical digest of the complete recovery receipt.
+  The receipt binding normalizes every string to
   Unicode NFC, includes only the fixed receipt members, sorts keys, emits
   integers and JSON booleans, and serializes as UTF-8 canonical JSON with
   `ensure_ascii=false`, comma/colon separators, and no whitespace before
@@ -96,6 +110,12 @@ before/after terminal receipt or explicit unknown effect
   caller-owned dictionaries cannot substitute for this lookup. A mismatch,
   expired record, future record, or already-consumed record discovered at that
   stage produces `preflight_rejected`.
+- Issuance is an atomic insert-if-absent. A confirmation ID is an immutable,
+  permanently nonreusable identity: neither an unconsumed nor consumed record
+  may be overwritten, reset, or deleted to authorize another request. Any new
+  authorization requires a newly generated confirmation ID; duplicate issuance
+  fails closed. Expired and consumed IDs remain as durable tombstones so record
+  pruning cannot make an old identifier issuable again.
 - After connecting and capturing the official SDK `before_receipt`, immediately
   before dispatch, use an atomic compare-and-set on the stored revision to
   change unconsumed to consumed. Concurrent consumers can both pass the early
@@ -104,6 +124,11 @@ before/after terminal receipt or explicit unknown effect
   dispatch and consumption are false, the bounded before receipt is present,
   and the after receipt is null. This state is not a preflight failure and must
   never retry.
+- The executable concurrency invariant is
+  `consume_count == dispatch_count == 1` for two or more callers that passed an
+  early lookup for one confirmation. Every caller runs lookup, before capture,
+  CAS, and conditional dispatch; the losing workflow itself constructs
+  `confirmation_consume_rejected` and never reaches the SDK dispatch boundary.
 - A future public tool would use one typed official SDK scene-load method only.
   Active-scene identity before and after dispatch must be read through the
   official SDK. Arbitrary HSL, Python, UI automation, generic command text,
@@ -115,10 +140,20 @@ before/after terminal receipt or explicit unknown effect
   the confirmation. Verified success requires an `after_receipt` from a fresh
   official SDK read-back. Both receipts include SDK scene identity and bounded
   filesystem name, byte-count, and SHA-256 evidence.
-- `confirmation_consume_rejected` is the only connected but not dispatched
+- `scene_identity_sha256` is not an opaque implementation choice. It is the
+  SHA-256 of compact, sorted-key UTF-8 JSON containing exactly the Unicode-NFC
+  scene name from `GetSceneName`, unsigned frame count from `GetFrameCount`, and
+  canonical-path SHA-256 obtained by resolving the path returned by
+  `GetSceneName` to the guarded Windows final-path identity. The contract's
+  positive Unicode golden vector and independent name/frame/path negative
+  observations are normative; timestamps, random values, object addresses, and
+  nondeterministic serialization are forbidden. The SDK-derived scene name must
+  also equal the receipt's bounded `file_name`.
+- `confirmation_consume_rejected` is the CAS-loss connected-but-not-dispatched
   terminal state. It reports `effect=unknown` because the winning concurrent
   consumer may dispatch after this request's before capture; it does not claim
-  an after read-back.
+  an after read-back. `target_guard_rejected` is the other connected,
+  not-dispatched state and represents failed immediate guard recapture.
 - `succeeded` is the only state allowed to report `effect=verified`. Its
   machine-readable `semantic_postconditions` require distinct before/after
   scene identities and require the after name, bytes, and digest to equal the

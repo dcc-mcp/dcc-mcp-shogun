@@ -1,4 +1,4 @@
-contract_version: "1.2"
+contract_version: "1.3"
 status: proposed-design-only
 implementation_authorized: false
 
@@ -41,19 +41,29 @@ confirmation_authority:
     - request_id
     - canonical_trusted_root_sha256
     - canonical_path_sha256
+    - target_volume_serial
+    - target_file_id
     - recovery_receipt_binding_sha256
   path_canonicalization: windows_handle_final_path_identity_v1
   receipt_canonicalization: nfc_sorted_compact_json_utf8_v1
   digest_algorithm: sha256_utf8_canonical_v1
   max_ttl_seconds: 300
+  issuance_write: atomic_insert_if_absent
+  confirmation_id_reuse: forbidden_forever
+  reauthorization_requires: new_confirmation_id
+  record_retention: durable_tombstone_after_expiry_or_consumption
   consume: atomic_compare_and_set_unconsumed_before_dispatch
+  concurrency_invariant: consume_count_equals_dispatch_count_equals_one
   state_machine:
     - authenticated_issue_to_trusted_store
     - trusted_lookup_by_confirmation_id
     - compare_request_path_receipt_freshness_and_unconsumed
+    - open_and_hold_conflict_denying_target_guard
     - connect_host_and_capture_before_receipt
+    - recapture_same_guarded_handle_identity_and_receipt
     - atomic_compare_and_set_consume
     - dispatch_only_for_consume_winner
+    - official_sdk_readback_matches_guarded_confirmation_identity
   issuance_record_schema:
     $schema: https://json-schema.org/draft/2020-12/schema
     type: object
@@ -63,6 +73,8 @@ confirmation_authority:
       - request_id
       - canonical_trusted_root_sha256
       - canonical_path_sha256
+      - target_volume_serial
+      - target_file_id
       - recovery_receipt_binding_sha256
       - issued_at_epoch_seconds
       - expires_at_epoch_seconds
@@ -71,7 +83,7 @@ confirmation_authority:
       - consumed
       - revision
     properties:
-      record_version: {type: string, const: "1.0"}
+      record_version: {type: string, const: "1.1"}
       confirmation_id:
         type: string
         minLength: 1
@@ -84,6 +96,8 @@ confirmation_authority:
         pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
       canonical_trusted_root_sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
       canonical_path_sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+      target_volume_serial: {type: string, pattern: "^[0-9A-F]{16}$"}
+      target_file_id: {type: string, pattern: "^[0-9a-f]{32}$"}
       recovery_receipt_binding_sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
       issued_at_epoch_seconds: {type: integer, minimum: 0}
       expires_at_epoch_seconds: {type: integer, minimum: 1}
@@ -161,6 +175,40 @@ canonicalization:
           active_scene_changed: false
         canonical_utf8_hex: 7b226163746976655f7363656e655f6368616e676564223a66616c73652c2266696c655f6e616d65223a22e9959ce5a4b45fc3892e766466222c2266696c655f73697a655f6279746573223a343039362c22726563656970745f76657273696f6e223a312c22736861323536223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161227d
         sha256: ce41a69eec6594a5511ea7d219a26bb84af1d7db033876a1124a5b7cbbe12e58
+  scene_identity:
+    version: official-sdk-scene-identity-json-v1
+    official_sdk_calls: [GetSceneName, GetFrameCount]
+    field_sources:
+      scene_name: GetSceneName.name_normalized_to_unicode_nfc
+      frame_count: GetFrameCount.unsigned_integer
+      canonical_path_sha256: GetSceneName.path_resolved_to_guarded_windows_final_path_identity
+    members: [canonical_path_sha256, frame_count, scene_name]
+    key_order: ascending_unicode_code_point
+    encoding: utf-8
+    ensure_ascii: false
+    separators: [comma, colon]
+    insignificant_whitespace: forbidden
+    digest: sha256
+    golden_vectors:
+      - name: unicode_scene_name
+        official_sdk_observation:
+          scene_name: 镜头_É.vdf
+          frame_count: 240
+          canonical_path_sha256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+        canonical_utf8_hex: 7b2263616e6f6e6963616c5f706174685f736861323536223a2264646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464222c226672616d655f636f756e74223a3234302c227363656e655f6e616d65223a22e9959ce5a4b45fc3892e766466227d
+        sha256: 65cc4ddf29fb809c0bf6760edb6429962298e11deed892f7f031d2eaf3915d16
+
+target_guard:
+  open_api: CreateFileW
+  desired_access: [GENERIC_READ, FILE_READ_ATTRIBUTES]
+  share_mode: [FILE_SHARE_READ]
+  creation_disposition: OPEN_EXISTING
+  deny_conflicting_access: [write, delete, rename, replace]
+  identity_fields: [canonical_path_sha256, volume_serial, file_id]
+  hold_from: preflight_identity_and_receipt_match
+  hold_until: terminal_official_sdk_readback_or_unknown_effect
+  predispatch_recapture: same_guarded_handle_immediately_before_confirmation_cas
+  readback_match: official_sdk_active_scene_to_guarded_confirmation_identity
 
 input_schema:
   $schema: https://json-schema.org/draft/2020-12/schema
@@ -217,6 +265,26 @@ output_schema:
   $id: https://github.com/dcc-mcp/dcc-mcp-shogun/docs/contracts/restore-scene-output.schema.json
   title: Proposed recovery-scene restore terminal result
   $defs:
+    scene_identity_fields:
+      type: object
+      required: [canonical_path_sha256, frame_count, scene_name]
+      properties:
+        canonical_path_sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+        frame_count: {type: integer, minimum: 0}
+        scene_name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: "^[^/\\\\]+$"
+      additionalProperties: false
+    target_identity:
+      type: object
+      required: [canonical_path_sha256, volume_serial, file_id]
+      properties:
+        canonical_path_sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+        volume_serial: {type: string, pattern: "^[0-9A-F]{16}$"}
+        file_id: {type: string, pattern: "^[0-9a-f]{32}$"}
+      additionalProperties: false
     recovery_receipt:
       type: object
       required: [receipt_version, file_name, file_size_bytes, sha256, active_scene_changed]
@@ -239,6 +307,7 @@ output_schema:
         - file_name
         - file_size_bytes
         - sha256
+        - scene_identity_fields
         - scene_identity_sha256
       properties:
         active_scene_observed_via: {type: string, const: official_sdk}
@@ -250,8 +319,15 @@ output_schema:
           pattern: "^[^/\\\\]+$"
         file_size_bytes: {type: integer, minimum: 1}
         sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+        scene_identity_fields: {$ref: "#/$defs/scene_identity_fields"}
         scene_identity_sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+        target_identity: {$ref: "#/$defs/target_identity"}
       additionalProperties: false
+    guarded_scene_receipt:
+      allOf:
+        - {$ref: "#/$defs/scene_receipt"}
+        - type: object
+          required: [target_identity]
     preflight_rejected_context:
       type: object
       required:
@@ -323,6 +399,39 @@ output_schema:
         before_receipt: {$ref: "#/$defs/scene_receipt"}
         after_receipt: {type: "null"}
       additionalProperties: false
+    target_guard_rejected_context:
+      type: object
+      required:
+        - receipt_version
+        - request_id
+        - state
+        - effect
+        - replay_allowed
+        - host_connection_performed
+        - before_receipt_captured
+        - dispatch_performed
+        - confirmation_consumed
+        - guard_outcome
+        - before_receipt
+        - after_receipt
+      properties:
+        receipt_version: {type: string, const: "1.0"}
+        request_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        state: {type: string, const: target_guard_rejected}
+        effect: {type: string, const: unknown}
+        replay_allowed: {type: boolean, const: false}
+        host_connection_performed: {type: boolean, const: true}
+        before_receipt_captured: {type: boolean, const: true}
+        dispatch_performed: {type: boolean, const: false}
+        confirmation_consumed: {type: boolean, const: false}
+        guard_outcome: {type: string, const: predispatch_identity_or_receipt_mismatch}
+        before_receipt: {$ref: "#/$defs/scene_receipt"}
+        after_receipt: {type: "null"}
+      additionalProperties: false
     dispatched_context:
       type: object
       required:
@@ -362,23 +471,26 @@ output_schema:
       allOf:
         - {$ref: "#/$defs/dispatched_context"}
         - type: object
-          required: [postcondition_evidence]
+          required: [approved_target_identity, postcondition_evidence]
           properties:
             state: {type: string, const: succeeded}
             effect: {type: string, const: verified}
             readback_performed: {type: boolean, const: true}
+            approved_target_identity: {$ref: "#/$defs/target_identity"}
             postcondition_evidence:
               type: object
               required:
                 - active_scene_readback_performed
                 - before_after_distinct
                 - after_matches_approved_recovery_receipt
+                - after_matches_guarded_confirmation_identity
               properties:
                 active_scene_readback_performed: {type: boolean, const: true}
                 before_after_distinct: {type: boolean, const: true}
                 after_matches_approved_recovery_receipt: {type: boolean, const: true}
+                after_matches_guarded_confirmation_identity: {type: boolean, const: true}
               additionalProperties: false
-            after_receipt: {$ref: "#/$defs/scene_receipt"}
+            after_receipt: {$ref: "#/$defs/guarded_scene_receipt"}
       unevaluatedProperties: false
     failed_unchanged_context:
       allOf:
@@ -440,6 +552,15 @@ output_schema:
     - type: object
       required: [success, message, prompt, error, context]
       properties:
+        success: {type: boolean, const: false}
+        message: {type: string}
+        prompt: {type: [string, "null"]}
+        error: {type: string, const: RestoreTargetGuardRejected}
+        context: {$ref: "#/$defs/target_guard_rejected_context"}
+      additionalProperties: false
+    - type: object
+      required: [success, message, prompt, error, context]
+      properties:
         success: {type: boolean, const: true}
         message: {type: string}
         prompt: {type: [string, "null"]}
@@ -491,16 +612,29 @@ output_schema:
                 state: {type: string, const: indeterminate}
       additionalProperties: false
 
-result_validation_pipeline: [draft2020_schema, semantic_postconditions]
+result_validation_pipeline: [draft2020_schema, semantic_postconditions, scene_identity_digest]
+
+scene_receipt_validation:
+  apply_to: [before_receipt, after_receipt]
+  canonicalization: official-sdk-scene-identity-json-v1
+  fields_member: scene_identity_fields
+  digest_member: scene_identity_sha256
+  field_relations: [scene_identity_fields.scene_name_equals_file_name]
+  mismatch: reject_terminal_result
 
 semantic_postconditions:
   preflight_rejected: {}
   confirmation_consume_rejected: {}
+  target_guard_rejected: {}
   succeeded:
     equal:
       - [/context/after_receipt/file_name, /context/approved_recovery_receipt/file_name]
       - [/context/after_receipt/file_size_bytes, /context/approved_recovery_receipt/file_size_bytes]
       - [/context/after_receipt/sha256, /context/approved_recovery_receipt/sha256]
+      - [/context/after_receipt/target_identity/canonical_path_sha256, /context/approved_target_identity/canonical_path_sha256]
+      - [/context/after_receipt/target_identity/volume_serial, /context/approved_target_identity/volume_serial]
+      - [/context/after_receipt/target_identity/file_id, /context/approved_target_identity/file_id]
+      - [/context/after_receipt/scene_identity_fields/canonical_path_sha256, /context/approved_target_identity/canonical_path_sha256]
     not_equal:
       - [/context/before_receipt/scene_identity_sha256, /context/after_receipt/scene_identity_sha256]
   failed_unchanged:

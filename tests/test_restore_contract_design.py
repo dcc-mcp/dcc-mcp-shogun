@@ -6,7 +6,7 @@ import ntpath
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Lock
+from threading import Barrier, Lock
 
 import pytest
 import yaml
@@ -48,20 +48,26 @@ def _request(**overrides):
     return request
 
 
-def _scene_receipt(file_name: str, identity_digest: str, file_digest: str):
+def _scene_receipt(file_name: str, canonical_path_digest: str, file_digest: str):
+    identity_fields = {
+        "canonical_path_sha256": canonical_path_digest,
+        "frame_count": 240,
+        "scene_name": file_name,
+    }
     return {
         "active_scene_observed_via": "official_sdk",
         "file_evidence_observed_via": "filesystem",
         "file_name": file_name,
         "file_size_bytes": 4096,
         "sha256": file_digest,
-        "scene_identity_sha256": identity_digest,
+        "scene_identity_fields": identity_fields,
+        "scene_identity_sha256": _scene_identity_binding(identity_fields)[1],
     }
 
 
 def _result(state: str):
     before = _scene_receipt("working_scene.vdf", "b" * 64, "c" * 64)
-    after = _scene_receipt("marked_take.vdf", "a" * 64, "a" * 64)
+    after = _scene_receipt("marked_take.vdf", "d" * 64, "a" * 64)
     common = {
         "receipt_version": "1.0",
         "request_id": "restore-0001",
@@ -72,6 +78,12 @@ def _result(state: str):
         "approved_recovery_receipt": _request()["recovery_receipt"],
     }
     if state == "succeeded":
+        target_identity = {
+            "canonical_path_sha256": "d" * 64,
+            "volume_serial": "00000000A1B2C3D4",
+            "file_id": "00112233445566778899aabbccddeeff",
+        }
+        after["target_identity"] = dict(target_identity)
         return {
             "success": True,
             "message": "Recovery scene restore verified.",
@@ -81,10 +93,12 @@ def _result(state: str):
                 **common,
                 "effect": "verified",
                 "readback_performed": True,
+                "approved_target_identity": target_identity,
                 "postcondition_evidence": {
                     "active_scene_readback_performed": True,
                     "before_after_distinct": True,
                     "after_matches_approved_recovery_receipt": True,
+                    "after_matches_guarded_confirmation_identity": True,
                 },
                 "before_receipt": before,
                 "after_receipt": after,
@@ -185,6 +199,15 @@ def _validate_result(result):
     for left, right in rules.get("not_equal", []):
         if _pointer(result, left) == _pointer(result, right):
             errors.append(f"{left} must not equal {right}")
+    for receipt_name in _contract()["scene_receipt_validation"]["apply_to"]:
+        receipt = result["context"].get(receipt_name)
+        if receipt is None:
+            continue
+        expected = _scene_identity_binding(receipt["scene_identity_fields"])[1]
+        if receipt["scene_identity_sha256"] != expected:
+            errors.append(f"/{receipt_name}/scene_identity_sha256 must match canonical fields")
+        if receipt["scene_identity_fields"]["scene_name"] != receipt["file_name"]:
+            errors.append(f"/{receipt_name}/scene_name must equal file_name")
     if errors:
         raise ValidationError("; ".join(errors))
 
@@ -229,6 +252,16 @@ def _normalize_receipt_strings(value):
 def _receipt_binding(receipt):
     canonical_bytes = json.dumps(
         _normalize_receipt_strings(receipt),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return canonical_bytes, hashlib.sha256(canonical_bytes).hexdigest()
+
+
+def _scene_identity_binding(observation):
+    canonical_bytes = json.dumps(
+        _normalize_receipt_strings(observation),
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
@@ -291,6 +324,7 @@ class FakeTrustedConfirmationStore:
         self.resolver = resolver or _resolver()
         self._records = {}
         self._lock = Lock()
+        self.consume_count = 0
 
     def issue(self, request, *, authenticated, now=NOW_EPOCH_SECONDS):
         if not authenticated:
@@ -299,11 +333,13 @@ class FakeTrustedConfirmationStore:
         target = self.resolver.resolve(request["file_path"])
         _, receipt_digest = _receipt_binding(request["recovery_receipt"])
         record = {
-            "record_version": "1.0",
+            "record_version": "1.1",
             "confirmation_id": request["operator_confirmation"]["confirmation_id"],
             "request_id": request["request_id"],
             "canonical_trusted_root_sha256": root["sha256"],
             "canonical_path_sha256": target["sha256"],
+            "target_volume_serial": target["volume_serial"],
+            "target_file_id": target["file_id"],
             "recovery_receipt_binding_sha256": receipt_digest,
             "issued_at_epoch_seconds": now - 30,
             "expires_at_epoch_seconds": now + 270,
@@ -315,7 +351,10 @@ class FakeTrustedConfirmationStore:
         schema = _contract()["confirmation_authority"]["issuance_record_schema"]
         Draft202012Validator.check_schema(schema)
         Draft202012Validator(schema).validate(record)
-        self._records[record["confirmation_id"]] = record
+        with self._lock:
+            if record["confirmation_id"] in self._records:
+                raise ValueError("confirmation ID is immutable and nonreusable")
+            self._records[record["confirmation_id"]] = record
         return record["confirmation_id"]
 
     def trusted_lookup_and_compare(self, request, *, now=NOW_EPOCH_SECONDS):
@@ -330,6 +369,8 @@ class FakeTrustedConfirmationStore:
             "request_id": request["request_id"],
             "canonical_trusted_root_sha256": root["sha256"],
             "canonical_path_sha256": target["sha256"],
+            "target_volume_serial": target["volume_serial"],
+            "target_file_id": target["file_id"],
             "recovery_receipt_binding_sha256": receipt_digest,
         }
         matches = all(record[field] == value for field, value in expected.items())
@@ -337,7 +378,15 @@ class FakeTrustedConfirmationStore:
         ttl = record["expires_at_epoch_seconds"] - record["issued_at_epoch_seconds"] <= 300
         if not (matches and fresh and ttl and not record["consumed"]):
             return None
-        return {"confirmation_id": confirmation_id, "revision": record["revision"]}
+        return {
+            "confirmation_id": confirmation_id,
+            "revision": record["revision"],
+            "approved_target_identity": {
+                "canonical_path_sha256": record["canonical_path_sha256"],
+                "volume_serial": record["target_volume_serial"],
+                "file_id": record["target_file_id"],
+            },
+        }
 
     def cas_consume(self, ticket):
         with self._lock:
@@ -346,12 +395,104 @@ class FakeTrustedConfirmationStore:
                 return False
             record["consumed"] = True
             record["revision"] += 1
+            self.consume_count += 1
             return True
+
+
+class FakeOfficialSdkBoundary:
+    def __init__(self):
+        self._lock = Lock()
+        self.before_capture_count = 0
+        self.dispatch_count = 0
+        self.readback_count = 0
+
+    def capture_before(self):
+        with self._lock:
+            self.before_capture_count += 1
+        return _scene_receipt("working_scene.vdf", "b" * 64, "c" * 64)
+
+    def dispatch_restore(self):
+        with self._lock:
+            self.dispatch_count += 1
+
+    def readback_after(self):
+        with self._lock:
+            self.readback_count += 1
+
+
+class FakeGuardedTargetBoundary:
+    def __init__(self):
+        self._lock = Lock()
+        self.open_count = 0
+        self.recapture_count = 0
+        self.release_count = 0
+        self._active_count = 0
+
+    def open(self):
+        with self._lock:
+            self.open_count += 1
+            self._active_count += 1
+        return {"held": True}
+
+    def recapture(self, token):
+        assert token["held"] is True
+        with self._lock:
+            self.recapture_count += 1
+
+    def conflicting_replace_allowed(self):
+        with self._lock:
+            return self._active_count == 0
+
+    def release(self, token):
+        assert token["held"] is True
+        token["held"] = False
+        with self._lock:
+            self.release_count += 1
+            self._active_count -= 1
+
+
+class FakeRestoreWorkflow:
+    def __init__(self, store, sdk, guard, before_cas_barrier):
+        self.store = store
+        self.sdk = sdk
+        self.guard = guard
+        self.before_cas_barrier = before_cas_barrier
+        self.conflicting_replace_observations = []
+
+    def execute(self, request):
+        ticket = self.store.trusted_lookup_and_compare(request)
+        assert ticket is not None
+        guard_token = self.guard.open()
+        before_receipt = self.sdk.capture_before()
+        self.guard.recapture(guard_token)
+        self.conflicting_replace_observations.append(self.guard.conflicting_replace_allowed())
+        self.before_cas_barrier.wait()
+        if not self.store.cas_consume(ticket):
+            result = _result("confirmation_consume_rejected")
+            result["context"]["before_receipt"] = before_receipt
+            self.guard.release(guard_token)
+            return result
+        self.sdk.dispatch_restore()
+        self.sdk.readback_after()
+        result = _result("succeeded")
+        result["context"]["approved_target_identity"] = ticket["approved_target_identity"]
+        result["context"]["after_receipt"]["target_identity"] = ticket["approved_target_identity"]
+        after_identity_fields = result["context"]["after_receipt"]["scene_identity_fields"]
+        after_identity_fields["canonical_path_sha256"] = ticket["approved_target_identity"][
+            "canonical_path_sha256"
+        ]
+        result["context"]["after_receipt"]["scene_identity_sha256"] = _scene_identity_binding(
+            after_identity_fields
+        )[1]
+        result["context"]["before_receipt"] = before_receipt
+        self.guard.release(guard_token)
+        return result
 
 
 def test_restore_contract_is_design_only_and_fail_closed():
     contract = _contract()
 
+    assert contract["contract_version"] == "1.3"
     assert contract["status"] == "proposed-design-only"
     assert contract["implementation_authorized"] is False
     assert contract["operation"] == {
@@ -575,19 +716,55 @@ def test_caller_owned_confirmation_dict_cannot_authorize():
     assert store.trusted_lookup_and_compare(request) is None
 
 
-def test_two_early_confirmation_lookups_have_exactly_one_cas_winner():
+def test_consumed_confirmation_id_cannot_be_reissued_or_resurrected():
+    request = _request()
+    store = FakeTrustedConfirmationStore()
+    authority = _contract()["confirmation_authority"]
+    assert authority["issuance_write"] == "atomic_insert_if_absent"
+    assert authority["confirmation_id_reuse"] == "forbidden_forever"
+    assert authority["reauthorization_requires"] == "new_confirmation_id"
+    assert authority["record_retention"] == "durable_tombstone_after_expiry_or_consumption"
+    store.issue(request, authenticated=True)
+    ticket = store.trusted_lookup_and_compare(request)
+    assert ticket is not None
+    assert store.cas_consume(ticket)
+
+    with pytest.raises(ValueError, match="confirmation ID is immutable and nonreusable"):
+        store.issue(request, authenticated=True)
+    assert store.trusted_lookup_and_compare(request) is None
+
+
+def test_concurrent_restore_workflows_consume_and_dispatch_exactly_once():
     request = _request()
     store = FakeTrustedConfirmationStore()
     store.issue(request, authenticated=True)
-    tickets = [store.trusted_lookup_and_compare(request) for _ in range(2)]
-    assert all(ticket is not None for ticket in tickets)
+    sdk = FakeOfficialSdkBoundary()
+    guard = FakeGuardedTargetBoundary()
+    workflow = FakeRestoreWorkflow(store, sdk, guard, Barrier(2))
+    assert _contract()["confirmation_authority"]["concurrency_invariant"] == (
+        "consume_count_equals_dispatch_count_equals_one"
+    )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        consumed = list(executor.map(store.cas_consume, tickets))
+        results = list(executor.map(workflow.execute, (request, request)))
 
-    assert sorted(consumed) == [False, True]
-    loser_result = _result("confirmation_consume_rejected")
-    _validate_result(loser_result)
+    assert store.consume_count == sdk.dispatch_count == 1
+    assert sdk.before_capture_count == 2
+    assert sdk.readback_count == 1
+    assert guard.open_count == guard.recapture_count == guard.release_count == 2
+    assert workflow.conflicting_replace_observations == [False, False]
+    assert guard.conflicting_replace_allowed() is True
+    assert sorted(result["context"]["state"] for result in results) == [
+        "confirmation_consume_rejected",
+        "succeeded",
+    ]
+    for result in results:
+        _validate_result(result)
+    loser_result = next(
+        result
+        for result in results
+        if result["context"]["state"] == "confirmation_consume_rejected"
+    )
     assert loser_result["context"]["host_connection_performed"] is True
     assert loser_result["context"]["before_receipt"] is not None
     assert loser_result["context"]["dispatch_performed"] is False
@@ -608,6 +785,8 @@ def test_confirmation_authority_defines_trusted_issuance_lookup_compare_and_cons
         "request_id",
         "canonical_trusted_root_sha256",
         "canonical_path_sha256",
+        "target_volume_serial",
+        "target_file_id",
         "recovery_receipt_binding_sha256",
     ]
     assert authority["consume"] == "atomic_compare_and_set_unconsumed_before_dispatch"
@@ -615,10 +794,75 @@ def test_confirmation_authority_defines_trusted_issuance_lookup_compare_and_cons
         "authenticated_issue_to_trusted_store",
         "trusted_lookup_by_confirmation_id",
         "compare_request_path_receipt_freshness_and_unconsumed",
+        "open_and_hold_conflict_denying_target_guard",
         "connect_host_and_capture_before_receipt",
+        "recapture_same_guarded_handle_identity_and_receipt",
         "atomic_compare_and_set_consume",
         "dispatch_only_for_consume_winner",
+        "official_sdk_readback_matches_guarded_confirmation_identity",
     ]
+
+
+def test_target_guard_freezes_exact_confirmed_file_through_dispatch_and_readback():
+    guard = _contract()["target_guard"]
+
+    assert guard == {
+        "open_api": "CreateFileW",
+        "desired_access": ["GENERIC_READ", "FILE_READ_ATTRIBUTES"],
+        "share_mode": ["FILE_SHARE_READ"],
+        "creation_disposition": "OPEN_EXISTING",
+        "deny_conflicting_access": ["write", "delete", "rename", "replace"],
+        "identity_fields": ["canonical_path_sha256", "volume_serial", "file_id"],
+        "hold_from": "preflight_identity_and_receipt_match",
+        "hold_until": "terminal_official_sdk_readback_or_unknown_effect",
+        "predispatch_recapture": "same_guarded_handle_immediately_before_confirmation_cas",
+        "readback_match": "official_sdk_active_scene_to_guarded_confirmation_identity",
+    }
+
+
+def test_predispatch_guard_recapture_failure_has_a_legal_not_dispatched_state():
+    result = {
+        "success": False,
+        "message": "Guarded target identity could not be reconfirmed before dispatch.",
+        "prompt": None,
+        "error": "RestoreTargetGuardRejected",
+        "context": {
+            "receipt_version": "1.0",
+            "request_id": "restore-0001",
+            "state": "target_guard_rejected",
+            "effect": "unknown",
+            "replay_allowed": False,
+            "host_connection_performed": True,
+            "before_receipt_captured": True,
+            "dispatch_performed": False,
+            "confirmation_consumed": False,
+            "guard_outcome": "predispatch_identity_or_receipt_mismatch",
+            "before_receipt": _scene_receipt("working_scene.vdf", "b" * 64, "c" * 64),
+            "after_receipt": None,
+        },
+    }
+
+    _validate_result(result)
+
+
+def test_success_requires_readback_to_match_exact_guarded_confirmation_identity():
+    identity = {
+        "canonical_path_sha256": "d" * 64,
+        "volume_serial": "00000000A1B2C3D4",
+        "file_id": "00112233445566778899aabbccddeeff",
+    }
+    result = _result("succeeded")
+    result["context"]["approved_target_identity"] = dict(identity)
+    result["context"]["after_receipt"]["target_identity"] = dict(identity)
+    result["context"]["postcondition_evidence"]["after_matches_guarded_confirmation_identity"] = (
+        True
+    )
+    _validate_result(result)
+
+    replaced = json.loads(json.dumps(result))
+    replaced["context"]["after_receipt"]["target_identity"]["file_id"] = "f" * 32
+    with pytest.raises(ValidationError, match="file_id"):
+        _validate_result(replaced)
 
 
 def test_windows_final_path_alias_and_dotdot_share_golden_identity():
@@ -687,10 +931,74 @@ def test_unicode_receipt_has_cross_language_golden_bytes_and_digest():
     assert vector["sha256"] == composed_digest
 
 
+def test_scene_identity_has_stable_official_sdk_fields_and_golden_digest():
+    identity_contract = _contract()["canonicalization"]["scene_identity"]
+    vector = identity_contract["golden_vectors"][0]
+    decomposed = dict(vector["official_sdk_observation"])
+    decomposed["scene_name"] = "镜头_É.vdf"
+    canonical_bytes, digest = _scene_identity_binding(vector["official_sdk_observation"])
+    decomposed_bytes, decomposed_digest = _scene_identity_binding(decomposed)
+
+    assert identity_contract["official_sdk_calls"] == ["GetSceneName", "GetFrameCount"]
+    assert identity_contract["members"] == [
+        "canonical_path_sha256",
+        "frame_count",
+        "scene_name",
+    ]
+    assert decomposed_bytes == canonical_bytes
+    assert decomposed_digest == digest
+    assert vector["canonical_utf8_hex"] == canonical_bytes.hex()
+    assert vector["sha256"] == digest
+    for changed_field, changed_value in (
+        ("scene_name", "other_take.vdf"),
+        ("frame_count", 241),
+        ("canonical_path_sha256", "e" * 64),
+    ):
+        changed = dict(vector["official_sdk_observation"])
+        changed[changed_field] = changed_value
+        assert _scene_identity_binding(changed)[1] != digest
+
+
+def test_scene_receipt_rejects_digest_not_derived_from_its_sdk_observation():
+    result = _result("succeeded")
+    before_fields = {
+        "scene_name": "working_scene.vdf",
+        "frame_count": 240,
+        "canonical_path_sha256": "e" * 64,
+    }
+    after_fields = {
+        "scene_name": "marked_take.vdf",
+        "frame_count": 240,
+        "canonical_path_sha256": "d" * 64,
+    }
+    for receipt, fields in (
+        (result["context"]["before_receipt"], before_fields),
+        (result["context"]["after_receipt"], after_fields),
+    ):
+        receipt["scene_identity_fields"] = fields
+        receipt["scene_identity_sha256"] = _scene_identity_binding(fields)[1]
+    _validate_result(result)
+
+    nondeterministic = json.loads(json.dumps(result))
+    nondeterministic["context"]["after_receipt"]["scene_identity_sha256"] = "f" * 64
+    with pytest.raises(ValidationError, match="scene_identity_sha256"):
+        _validate_result(nondeterministic)
+
+    contradictory = json.loads(json.dumps(result))
+    fields = contradictory["context"]["after_receipt"]["scene_identity_fields"]
+    fields["scene_name"] = "different_scene.vdf"
+    contradictory["context"]["after_receipt"]["scene_identity_sha256"] = _scene_identity_binding(
+        fields
+    )[1]
+    with pytest.raises(ValidationError, match="scene_name must equal file_name"):
+        _validate_result(contradictory)
+
+
 def test_result_validation_requires_schema_and_semantic_postconditions():
     assert _contract()["result_validation_pipeline"] == [
         "draft2020_schema",
         "semantic_postconditions",
+        "scene_identity_digest",
     ]
 
 
@@ -749,6 +1057,16 @@ def test_adr_preserves_the_design_only_acceptance_boundary():
         "reparse",
         "Unicode NFC",
         "golden vectors",
+        "CreateFileW",
+        "FILE_SHARE_READ",
+        "target_guard_rejected",
+        "atomic insert-if-absent",
+        "permanently nonreusable",
+        "durable tombstones",
+        "consume_count == dispatch_count == 1",
+        "GetSceneName",
+        "GetFrameCount",
+        "timestamps",
         "disposable marked take",
         "Refs #36",
     ):
