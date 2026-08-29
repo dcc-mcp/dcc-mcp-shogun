@@ -29,7 +29,7 @@ Install the released wheel, then verify the exact Shogun Post process before
 starting the adapter:
 
 ```powershell
-python -m pip install "dcc-mcp-shogun==0.11.0" # x-release-please-version
+python -m pip install "dcc-mcp-shogun==0.11.1" # x-release-please-version
 $env:DCC_MCP_SHOGUN_HOST_PID = "<SHOGUN_POST_PID>"
 dcc-mcp-shogun doctor --json
 dcc-mcp-shogun verify --json
