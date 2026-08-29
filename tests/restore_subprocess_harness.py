@@ -143,9 +143,25 @@ def run_broker(endpoint_path_value: str) -> None:
             }
             delivered = 0
             for waiter in waiters.pop(job_id, []):
-                waiter.send(wakeup)
-                waiter.close()
-                delivered += 1
+                try:
+                    waiter.send(wakeup)
+                except (
+                    BrokenPipeError,
+                    ConnectionAbortedError,
+                    ConnectionResetError,
+                    EOFError,
+                    OSError,
+                ):
+                    # A disconnected waiter must not prevent delivery to the
+                    # remaining live waiters.
+                    pass
+                else:
+                    delivered += 1
+                finally:
+                    try:
+                        waiter.close()
+                    except OSError:
+                        pass
             connection.send({"acknowledged": True, "delivered": delivered})
             connection.close()
         elif action == "stop":

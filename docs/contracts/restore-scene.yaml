@@ -664,7 +664,7 @@ input_schema:
       type: string
       minLength: 3
       maxLength: 4096
-      pattern: "^[A-Za-z]:[\\\\/][^:]+"
+      pattern: "^[A-Za-z]:[\\\\/][^:]+$"
     file_path:
       type: string
       minLength: 7

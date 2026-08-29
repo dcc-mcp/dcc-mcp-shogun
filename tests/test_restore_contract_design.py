@@ -4005,6 +4005,9 @@ def test_restore_request_requires_trusted_vdf_receipt_and_operator_confirmation(
         with pytest.raises(ValidationError):
             validator.validate(_request(file_path=file_path))
 
+    with pytest.raises(ValidationError):
+        validator.validate(_request(trusted_root="C:/operator-approved/recovery:trailing-garbage"))
+
 
 def test_restore_request_binds_the_complete_prior_recovery_receipt():
     validator = _validator("input_schema")

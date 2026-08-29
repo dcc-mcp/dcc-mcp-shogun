@@ -15,6 +15,7 @@ ROOT = Path(__file__).parents[1]
 HARNESS = ROOT / "tests" / "restore_subprocess_harness.py"
 CONTRACT = ROOT / "docs" / "contracts" / "restore-scene.yaml"
 ADR = ROOT / "docs" / "adr" / "0001-bounded-recovery-scene-restore.md"
+JOB_ID = "restore-job-cross-process-0001"
 
 
 def _run_harness(*args: object) -> subprocess.CompletedProcess[str]:
@@ -316,6 +317,69 @@ def test_notification_baseexception_replays_to_multiple_process_waiters(
             "attempts": 1,
             "acknowledged": 1,
         }
+    finally:
+        if broker.poll() is None:
+            stopped = _run_harness("broker-stop", endpoint_path)
+            assert stopped.returncode == 0, stopped.stderr
+            assert broker.wait(timeout=10) == 0
+        for waiter in waiters:
+            if waiter.poll() is None:
+                waiter.terminate()
+                waiter.wait(timeout=10)
+
+
+def test_notification_replay_skips_dead_waiter_and_wakes_live_waiters(tmp_path):
+    _persist_owner_claim(tmp_path)
+    endpoint_path = tmp_path / "notification-broker.json"
+    broker = _start_harness("broker", endpoint_path)
+    waiters: list[subprocess.Popen[str]] = []
+    try:
+        assert broker.stdout is not None
+        assert _readline_with_timeout(broker) == "READY"
+        waiters = [_start_harness("wait", endpoint_path, JOB_ID) for _ in range(3)]
+        for waiter in waiters:
+            assert _readline_with_timeout(waiter) == "READY"
+
+        dead_waiter, *live_waiters = waiters
+        dead_waiter.terminate()
+        assert dead_waiter.wait(timeout=10) != 0
+
+        cleanup_crash = _run_harness(
+            "recover",
+            tmp_path,
+            tmp_path / "cleanup-crash.json",
+            "--crash-after-cleanup-pending",
+        )
+        assert cleanup_crash.returncode == 23
+        notification_crash = _run_harness(
+            "recover",
+            tmp_path,
+            tmp_path / "notification-crash.json",
+            "--broker-endpoint",
+            endpoint_path,
+            "--crash-before-notify",
+        )
+        assert notification_crash.returncode != 0
+
+        replay_path = tmp_path / "notification-replay.json"
+        replay = _run_harness(
+            "recover",
+            tmp_path,
+            replay_path,
+            "--broker-endpoint",
+            endpoint_path,
+        )
+        assert replay.returncode == 0, replay.stderr
+        replay_result = json.loads(replay_path.read_text(encoding="utf-8"))
+        assert replay_result["notification_delivered_by_this_process"] is True
+        assert len(live_waiters) <= replay_result["waiters_woken"] <= len(waiters)
+
+        for waiter in live_waiters:
+            assert json.loads(_readline_with_timeout(waiter)) == {
+                "job_id": JOB_ID,
+                "terminal_source": "readback_owner_lost",
+            }
+            assert waiter.wait(timeout=10) == 0
     finally:
         if broker.poll() is None:
             stopped = _run_harness("broker-stop", endpoint_path)
