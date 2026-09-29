@@ -37,6 +37,29 @@ def test_uv_lock_root_version_matches_release_metadata():
     assert editable_root_versions == [__version__]
 
 
+def test_uv_lock_version_is_unambiguous_for_release_please():
+    # `uv.lock` is bumped through release-please's `generic` extra-file updater,
+    # which rewrites every occurrence of the outgoing version string. That is
+    # only safe while the project version identifies the editable root package
+    # and nothing else in the lock, so a second occurrence has to fail here
+    # instead of silently corrupting a dependency pin during a release.
+    root = Path(__file__).parents[1]
+    lock = (root / "uv.lock").read_text(encoding="utf-8")
+    config = json.loads((root / "release-please-config.json").read_text(encoding="utf-8"))
+    lock_entries = [
+        entry for entry in config["packages"]["."]["extra-files"] if entry.get("path") == "uv.lock"
+    ]
+
+    assert len(lock_entries) == 1
+    assert lock_entries[0]["type"] == "generic"
+
+    occurrences = re.findall(
+        r"(?<![\w.]){}".format(re.escape(__version__)) + r"(?![\w.])",
+        lock,
+    )
+    assert occurrences == [__version__]
+
+
 def test_ci_fails_closed_when_uv_lock_is_stale():
     root = Path(__file__).parents[1]
     workflow = yaml.safe_load((root / ".github" / "workflows" / "ci.yml").read_text())
@@ -223,6 +246,7 @@ def test_release_sources_are_synchronized_by_release_please():
     for path in (
         "pyproject.toml",
         "src/dcc_mcp_shogun/__version__.py",
+        "uv.lock",
         "README.md",
         "install.md",
         "src/dcc_mcp_shogun/skills/shogun-scene/SKILL.md",
