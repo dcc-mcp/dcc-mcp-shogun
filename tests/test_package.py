@@ -66,6 +66,15 @@ def test_uv_lock_release_entry_targets_the_root_package_by_name():
     # `[[package]]` entries are ordered, so a positional selector would start
     # rewriting an unrelated package as soon as a dependency is added or
     # removed ahead of the root entry.
+    #
+    # The full-selector assertion below is what actually closes the gap. The
+    # three shape checks above it all pass on a selector that is syntactically
+    # valid, still names the package, and yet matches zero nodes -- for example
+    # `...].bogus`. release-please's `GenericToml` only logs a warning when a
+    # jsonpath matches nothing and then returns the content unchanged, so such
+    # a selector degrades to the same silent no-op this test was written to
+    # catch. Pinning the whole string turns that entire mutation class into a
+    # hard failure here instead of a red `uv lock --check` on the release PR.
     entry = _release_please_uv_lock_entry()
 
     assert entry["type"] == "toml"
@@ -74,15 +83,23 @@ def test_uv_lock_release_entry_targets_the_root_package_by_name():
         "the uv.lock selector must not hardcode a package array index"
     )
     assert "dcc-mcp-shogun" in entry["jsonpath"]
+    assert entry["jsonpath"] == ("$.package[?(@.name.value=='dcc-mcp-shogun')].version"), (
+        "the uv.lock selector drifted; update this constant only alongside a real updater check"
+    )
 
 
 def test_uv_lock_release_entry_rewrites_only_the_root_version():
-    # Effect-level guard: apply the declared selector the way the release-please
-    # `toml` updater does -- a positional replacement of the single matched
-    # value -- and assert the result is the lock with only the editable root
-    # version raised. A selector that stops matching produces no edit at all,
-    # which is the failure mode that made the release PR red, so an empty match
-    # has to fail here rather than pass.
+    # Effect-level guard: rewrite only the version of the editable root
+    # package -- the single value the declared selector resolves to -- and
+    # assert the result is the lock with exactly that value raised. A selector
+    # that stops matching produces no edit at all, which is the failure mode
+    # that made the release PR red, so an empty match has to fail here rather
+    # than pass.
+    #
+    # This rewrites via the regex below, which mirrors the declared selector's
+    # position rather than evaluating `entry["jsonpath"]` itself, so it pins
+    # the effect but not the selector text. The selector text is pinned by
+    # `test_uv_lock_release_entry_targets_the_root_package_by_name`.
     root = Path(__file__).parents[1]
     lock_text = (root / "uv.lock").read_text(encoding="utf-8")
     entry = _release_please_uv_lock_entry()
