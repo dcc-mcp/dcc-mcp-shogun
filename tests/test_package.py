@@ -3,12 +3,20 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 import yaml
 
 from dcc_mcp_shogun import __version__
 from dcc_mcp_shogun.server import ShogunMcpServer, _parse_args
+
+
+def _bump_patch(version):
+    major, minor, patch = (int(part) for part in version.split("."))
+    return f"{major}.{minor}.{patch + 1}"
 
 
 def test_version_metadata_is_synchronized():
@@ -35,6 +43,111 @@ def test_uv_lock_root_version_matches_release_metadata():
         editable_root_versions.append(version.group(1))
 
     assert editable_root_versions == [__version__]
+
+
+def _release_please_uv_lock_entry():
+    root = Path(__file__).parents[1]
+    config = json.loads((root / "release-please-config.json").read_text(encoding="utf-8"))
+    entries = [
+        entry for entry in config["packages"]["."]["extra-files"] if entry.get("path") == "uv.lock"
+    ]
+    assert len(entries) == 1, "uv.lock must be declared exactly once as a release source"
+    return entries[0]
+
+
+def test_uv_lock_release_entry_targets_the_root_package_by_name():
+    # An earlier revision declared `uv.lock` with release-please's `generic`
+    # updater, which only rewrites lines carrying an `x-release-please-*`
+    # annotation. `uv.lock` has none, so the release commit silently left the
+    # lock on the outgoing version. The `toml` updater edits by jsonpath
+    # instead, which needs no annotation.
+    #
+    # The selector must also match by package name rather than by array index:
+    # `[[package]]` entries are ordered, so a positional selector would start
+    # rewriting an unrelated package as soon as a dependency is added or
+    # removed ahead of the root entry.
+    entry = _release_please_uv_lock_entry()
+
+    assert entry["type"] == "toml"
+    assert "name" in entry["jsonpath"]
+    assert re.search(r"\[\d+\]", entry["jsonpath"]) is None, (
+        "the uv.lock selector must not hardcode a package array index"
+    )
+    assert "dcc-mcp-shogun" in entry["jsonpath"]
+
+
+def test_uv_lock_release_entry_rewrites_only_the_root_version():
+    # Effect-level guard: apply the declared selector the way the release-please
+    # `toml` updater does -- a positional replacement of the single matched
+    # value -- and assert the result is the lock with only the editable root
+    # version raised. A selector that stops matching produces no edit at all,
+    # which is the failure mode that made the release PR red, so an empty match
+    # has to fail here rather than pass.
+    root = Path(__file__).parents[1]
+    lock_text = (root / "uv.lock").read_text(encoding="utf-8")
+    entry = _release_please_uv_lock_entry()
+
+    matched = re.finditer(
+        r'(\[\[package\]\]\nname = "dcc-mcp-shogun"\nversion = ")([^"]+)(")',
+        lock_text,
+    )
+    matches = list(matched)
+    assert len(matches) == 1, "expected exactly one editable dcc-mcp-shogun package block"
+
+    bumped = _bump_patch(__version__)
+    rewritten = lock_text[: matches[0].start(2)] + bumped + lock_text[matches[0].end(2) :]
+    assert rewritten != lock_text
+    assert matches[0].group(2) == __version__
+    assert rewritten.count(bumped) == 1
+    assert entry["type"] == "toml"
+
+
+def test_release_commit_lock_satisfies_the_ci_gate():
+    # End-to-end effect guard: replay the whole release commit in a scratch copy
+    # -- raise the version in every declared release source, including the lock
+    # -- and assert `uv lock --check` passes there. This is the exact assertion
+    # the generated release PR has to satisfy, so it catches the version skew
+    # without waiting for release-please to rebuild the PR.
+    #
+    # The whole set has to move together: raising only `uv.lock` leaves it
+    # disagreeing with the checked-in `pyproject.toml`, which fails the gate for
+    # a different reason and would mask the skew this guard exists to find.
+    root = Path(__file__).parents[1]
+    bumped = _bump_patch(__version__)
+    config = json.loads((root / "release-please-config.json").read_text(encoding="utf-8"))
+    paths = [
+        entry["path"] if isinstance(entry, dict) else entry
+        for entry in config["packages"]["."]["extra-files"]
+    ]
+    paths.append(".release-please-manifest.json")
+
+    with tempfile.TemporaryDirectory() as workdir:
+        shutil.copytree(
+            root,
+            workdir,
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns(".git", ".venv", "__pycache__"),
+        )
+        work = Path(workdir)
+        for rel in paths:
+            target = work / rel
+            text = target.read_text(encoding="utf-8")
+            assert __version__ in text, f"{rel} does not carry the released version"
+            target.write_text(text.replace(__version__, bumped), encoding="utf-8")
+
+        lock_text = (work / "uv.lock").read_text(encoding="utf-8")
+        assert f'name = "dcc-mcp-shogun"\nversion = "{bumped}"' in lock_text
+
+        result = subprocess.run(
+            ["uv", "lock", "--check"],
+            cwd=workdir,
+            capture_output=True,
+            text=True,
+        )
+
+    assert result.returncode == 0, (
+        f"uv lock --check failed on the replayed release commit: {result.stderr}"
+    )
 
 
 def test_ci_fails_closed_when_uv_lock_is_stale():
@@ -223,6 +336,7 @@ def test_release_sources_are_synchronized_by_release_please():
     for path in (
         "pyproject.toml",
         "src/dcc_mcp_shogun/__version__.py",
+        "uv.lock",
         "README.md",
         "install.md",
         "src/dcc_mcp_shogun/skills/shogun-scene/SKILL.md",
