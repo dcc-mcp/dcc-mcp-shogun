@@ -11,6 +11,14 @@
 - Add ROM labeling, subject calibration, QuickPost, and expanded processing
   settings from the official `Offline` interface.
 
+## [0.11.1](https://github.com/dcc-mcp/dcc-mcp-shogun/compare/v0.11.0...v0.11.1) (2026-10-01)
+
+
+### Bug Fixes
+
+* declare uv.lock as a release-please release source ([#46](https://github.com/dcc-mcp/dcc-mcp-shogun/issues/46)) ([ea78107](https://github.com/dcc-mcp/dcc-mcp-shogun/commit/ea7810736f001ef6f6afbe5353358b6e9655c5f3))
+* isolate disconnected restore waiters ([0e70469](https://github.com/dcc-mcp/dcc-mcp-shogun/commit/0e7046944dff1f654692836a2fedc7c36db4104a))
+
 ## [0.11.0](https://github.com/dcc-mcp/dcc-mcp-shogun/compare/v0.10.0...v0.11.0) (2026-08-24)
 
 
