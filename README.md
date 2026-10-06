@@ -27,7 +27,7 @@ on a general-purpose Python interpreter embedded in the Shogun Post UI.
 <!-- Generated from dcc-mcp-catalog.yml by scripts/generate_adapter_pointer.py in dcc-mcp/dcc-mcp-core. Do not edit by hand. -->
 ## Part of the DCC-MCP host matrix
 
-**dcc-mcp-shogun** — Vicon Shogun Post adapter with 67 typed Scene, channel, camera,
+**dcc-mcp-shogun** — Vicon Shogun Post adapter with 73 typed Scene, channel, camera,
 file, Timeline, editing, production-context, pipeline-context, and capability-gated
 Offline processing tools.
 
