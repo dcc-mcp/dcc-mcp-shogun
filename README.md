@@ -23,6 +23,27 @@ Shogun Post ships an external Python SDK. The adapter runs in its own Python
 process and connects to the application's local control stream; it does not rely
 on a general-purpose Python interpreter embedded in the Shogun Post UI.
 
+<!-- dcc-mcp-coverage-pointer:start -->
+<!-- Generated from dcc-mcp-catalog.yml by scripts/generate_adapter_pointer.py in dcc-mcp/dcc-mcp-core. Do not edit by hand. -->
+## Part of the DCC-MCP host matrix
+
+**dcc-mcp-shogun** — Vicon Shogun Post adapter with 67 typed Scene, channel, camera,
+file, Timeline, editing, production-context, pipeline-context, and capability-gated
+Offline processing tools.
+
+It is one of **47 host adapters** in the DCC-MCP catalog. Every adapter speaks the same
+MCP protocol and builds on the same core runtime contract; each one exposes the tools
+its own host needs on top of that.
+
+- [All host adapters and install metadata](https://dcc-mcp.github.io/ecosystem)
+- [Host matrix on the core README](https://github.com/dcc-mcp/dcc-mcp-core#readme)
+- [Showcase](https://dcc-mcp.github.io/showcase)
+
+This block is generated from the catalog entry in
+[`dcc-mcp-catalog.yml`](https://github.com/dcc-mcp/dcc-mcp-core/blob/main/dcc-mcp-catalog.yml).
+Re-run the generator after changing the catalog.
+<!-- dcc-mcp-coverage-pointer:end -->
+
 ## Installation
 
 Install the released wheel, then verify the exact Shogun Post process before
