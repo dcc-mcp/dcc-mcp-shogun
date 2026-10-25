@@ -31,7 +31,7 @@ on a general-purpose Python interpreter embedded in the Shogun Post UI.
 file, Timeline, editing, production-context, pipeline-context, and capability-gated
 Offline processing tools.
 
-It is one of **47 host adapters** in the DCC-MCP catalog. Every adapter speaks the same
+It is one of **48 host adapters** in the DCC-MCP catalog. Every adapter speaks the same
 MCP protocol and builds on the same core runtime contract; each one exposes the tools
 its own host needs on top of that.
 
