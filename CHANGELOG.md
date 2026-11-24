@@ -11,6 +11,14 @@
 - Add ROM labeling, subject calibration, QuickPost, and expanded processing
   settings from the official `Offline` interface.
 
+## [0.11.3](https://github.com/dcc-mcp/dcc-mcp-shogun/compare/v0.11.2...v0.11.3) (2026-11-24)
+
+
+### Documentation
+
+* refresh the generated DCC-MCP host matrix pointer ([efd7110](https://github.com/dcc-mcp/dcc-mcp-shogun/commit/efd71101b3b19deabf232fad823632b86078a40a))
+* refresh the generated DCC-MCP host matrix pointer ([abdea0e](https://github.com/dcc-mcp/dcc-mcp-shogun/commit/abdea0e64be1d5fb8b71ae742716d52f66783992))
+
 ## [0.11.2](https://github.com/dcc-mcp/dcc-mcp-shogun/compare/v0.11.1...v0.11.2) (2026-10-17)
 
 
